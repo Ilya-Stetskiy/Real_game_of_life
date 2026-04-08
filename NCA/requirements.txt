@@ -1,0 +1,6 @@
+numpy
+matplotlib
+jupyter
+pillow
+tqdm
+pytest
