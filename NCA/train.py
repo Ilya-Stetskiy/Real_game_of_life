@@ -116,11 +116,14 @@ def train_epoch(
     lambda_intermediate: float = 0.5,
     lambda_hidden_l2: float = 1e-4,
     grad_clip: float = 1.0,
+    show_progress: bool = False,
+    progress_desc: str = "train",
 ) -> Dict[str, float]:
     model.train()
     accumulators = {"loss": [], "final_loss": [], "intermediate_loss": [], "hidden_penalty": []}
 
-    for batch in loader:
+    iterator = tqdm(loader, desc=progress_desc, leave=False) if show_progress else loader
+    for batch in iterator:
         batch = to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
         predictions = run_rollout_batch(model, batch, stochastic=True)
@@ -139,6 +142,12 @@ def train_epoch(
         for key in accumulators:
             accumulators[key].append(float(losses[key].detach().cpu().item()))
 
+        if show_progress:
+            iterator.set_postfix(
+                loss=f"{accumulators['loss'][-1]:.4e}",
+                final=f"{accumulators['final_loss'][-1]:.4e}",
+            )
+
     return {key: float(np.mean(values)) for key, values in accumulators.items()}
 
 
@@ -148,16 +157,22 @@ def deterministic_eval(
     loader: Iterable[Dict[str, torch.Tensor]],
     device: torch.device,
     hidden_channels: int = 1,
+    show_progress: bool = False,
+    progress_desc: str = "det_eval",
 ) -> Dict[str, float]:
     model.eval()
     collected: Dict[str, List[float]] = {"one_step_mse": [], "rollout_mse": [], "population_mass_error": []}
 
-    for batch in loader:
+    iterator = tqdm(loader, desc=progress_desc, leave=False) if show_progress else loader
+    for batch in iterator:
         batch = to_device(batch, device)
         predictions = run_rollout_batch(model, batch, stochastic=False, hidden_channels=hidden_channels)
         metrics = compute_rollout_metrics(predictions, batch["targets_visible"])
         for key in collected:
             collected[key].append(metrics[key])
+
+        if show_progress:
+            iterator.set_postfix(rollout_mse=f"{metrics['rollout_mse']:.4e}")
 
     return {key: float(np.mean(values)) for key, values in collected.items()}
 
@@ -169,6 +184,8 @@ def stochastic_eval(
     device: torch.device,
     num_rollouts: int = 8,
     hidden_channels: int = 1,
+    show_progress: bool = False,
+    progress_desc: str = "stoch_eval",
 ) -> Dict[str, float]:
     model.eval()
     collected: Dict[str, List[float]] = {
@@ -179,7 +196,8 @@ def stochastic_eval(
         "population_mass_error": [],
     }
 
-    for batch in loader:
+    iterator = tqdm(loader, desc=progress_desc, leave=False) if show_progress else loader
+    for batch in iterator:
         batch = to_device(batch, device)
         predictions = []
         for _ in range(num_rollouts):
@@ -188,6 +206,9 @@ def stochastic_eval(
         metrics = compute_stochastic_metrics(sampled, batch["targets_visible"])
         for key in collected:
             collected[key].append(metrics[key])
+
+        if show_progress:
+            iterator.set_postfix(expected_mse=f"{metrics['expected_mse']:.4e}")
 
     return {key: float(np.mean(values)) for key, values in collected.items()}
 
