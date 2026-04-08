@@ -1,0 +1,9 @@
+.codex
+.venv/
+.deps/
+.deps_torch/
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+NCA/runs/
+*.pyc
