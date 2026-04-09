@@ -14,9 +14,30 @@ def _make_density_series(timesteps: int, height: int, width: int, offset: float)
     return np.stack(frames, axis=0)[..., None]
 
 
-def _write_dataset(root: Path, file_count: int = 4, timesteps: int = 10, height: int = 5, width: int = 6) -> None:
+def _make_multichannel_series(
+    timesteps: int,
+    height: int,
+    width: int,
+    offset: float,
+    channels: int,
+) -> np.ndarray:
+    base = _make_density_series(timesteps, height, width, offset=offset)
+    features = [base[..., 0]]
+    for channel in range(1, channels):
+        features.append(base[..., 0] * (channel + 1) + channel * 0.05)
+    return np.stack(features, axis=-1).astype(np.float32)
+
+
+def _write_dataset(
+    root: Path,
+    file_count: int = 4,
+    timesteps: int = 10,
+    height: int = 5,
+    width: int = 6,
+    channels: int = 1,
+) -> None:
     for file_id in range(file_count):
-        array = _make_density_series(timesteps, height, width, offset=file_id * 0.25)
+        array = _make_multichannel_series(timesteps, height, width, offset=file_id * 0.25, channels=channels)
         np.save(root / f"traj_{file_id}.npy", array.astype(np.float32))
 
 
@@ -113,3 +134,24 @@ def test_augmentation_keeps_input_target_alignment(tmp_path: Path) -> None:
     delta = item["targets_visible"][0] - item["input_visible"]
     expected = torch.full_like(delta, 0.1)
     assert torch.allclose(delta, expected)
+
+
+def test_dataset_supports_multiple_observed_channels(tmp_path: Path) -> None:
+    _write_dataset(tmp_path, file_count=2, timesteps=8, height=4, width=4, channels=2)
+    dataset = NCADataset(
+        data_root=tmp_path,
+        split="train",
+        split_mode="within_file",
+        min_steps=2,
+        max_steps=3,
+        augment=False,
+        seed=17,
+        data_channels=2,
+    )
+
+    item = dataset[0]
+    assert item["input_visible"].shape == (2, 4, 4)
+    assert item["targets_visible"].shape[1:] == (2, 4, 4)
+
+    collated = nca_collate_fn([dataset[0], dataset[1]])
+    assert collated["input_visible"].shape == (2, 2, 4, 4)

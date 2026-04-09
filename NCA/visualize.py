@@ -29,21 +29,37 @@ def to_numpy_visible(array) -> np.ndarray:
     raise ValueError(f"Expected array rank 2, 3, or 4, got {array.ndim}.")
 
 
+def select_visible_channel(array, channel_index: int = 0) -> np.ndarray:
+    if hasattr(array, "detach"):
+        array = array.detach().cpu().numpy()
+    array = np.asarray(array)
+    if array.ndim == 4:
+        return array[channel_index]
+    if array.ndim == 3:
+        return array[channel_index]
+    if array.ndim == 2:
+        if channel_index != 0:
+            raise ValueError("channel_index must be 0 for rank-2 arrays.")
+        return array
+    raise ValueError(f"Expected array rank 2, 3, or 4, got {array.ndim}.")
+
+
 def plot_triptych(
     input_visible,
     target_visible,
     prediction_visible,
     output_path: str | Path,
     title: Optional[str] = None,
+    channel_index: int = 0,
 ) -> Path:
     plt, _ = _import_matplotlib()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     figures = [
-        ("Input", to_numpy_visible(input_visible)),
-        ("Target", to_numpy_visible(target_visible)),
-        ("Prediction", to_numpy_visible(prediction_visible)),
+        ("Input", select_visible_channel(input_visible, channel_index=channel_index)),
+        ("Target", select_visible_channel(target_visible, channel_index=channel_index)),
+        ("Prediction", select_visible_channel(prediction_visible, channel_index=channel_index)),
     ]
     vmin = min(frame.min() for _, frame in figures)
     vmax = max(frame.max() for _, frame in figures)
@@ -117,6 +133,7 @@ def save_rollout_animation(
     output_path: str | Path,
     fps: int = 4,
     title: str = "NCA rollout",
+    channel_index: int = 0,
 ) -> Path:
     plt, animation = _import_matplotlib()
     output_path = Path(output_path)
@@ -126,9 +143,9 @@ def save_rollout_animation(
         rollout_visible = rollout_visible.detach().cpu().numpy()
     rollout_visible = np.asarray(rollout_visible)
     if rollout_visible.ndim == 5:
-        rollout_visible = rollout_visible[:, 0, 0]
+        rollout_visible = rollout_visible[:, 0, channel_index]
     elif rollout_visible.ndim == 4:
-        rollout_visible = rollout_visible[:, 0]
+        rollout_visible = rollout_visible[:, channel_index]
 
     fig, axis = plt.subplots(figsize=(4, 4))
     image = axis.imshow(rollout_visible[0], cmap="viridis", animated=True)

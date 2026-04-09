@@ -55,9 +55,21 @@ class SampleIndex:
 class VisibleChannelNormalizer:
     """Keep density raw and normalize optional visible auxiliary channels."""
 
-    def __init__(self, means: Optional[np.ndarray] = None, stds: Optional[np.ndarray] = None):
+    def __init__(
+        self,
+        means: Optional[np.ndarray] = None,
+        stds: Optional[np.ndarray] = None,
+        data_channels: int = 1,
+        primary_channel: int = 0,
+    ):
+        if data_channels < 1:
+            raise ValueError("data_channels must be >= 1.")
+        if not 0 <= primary_channel < data_channels:
+            raise ValueError("primary_channel must index one of the observed channels.")
         self.means = means
         self.stds = stds
+        self.data_channels = int(data_channels)
+        self.primary_channel = int(primary_channel)
 
     @property
     def enabled(self) -> bool:
@@ -72,17 +84,20 @@ class VisibleChannelNormalizer:
         accum_sum = None
         accum_sq = None
         count = 0
-        extra_channels = None
+        normalized_channel_indices = None
 
         for path in files:
             array = np.load(path, mmap_mode="r")
             validate_array_shape(array, source=str(path))
-            if array.shape[-1] <= 1:
+            validate_data_channels(array, self.data_channels, source=str(path))
+            normalized_channel_indices = [
+                index for index in range(self.data_channels) if index != self.primary_channel
+            ]
+            if not normalized_channel_indices:
                 continue
 
-            extras = np.asarray(array[..., 1:], dtype=np.float64)
-            extra_channels = extras.shape[-1]
-            flattened = extras.reshape(-1, extra_channels)
+            extras = np.asarray(array[..., normalized_channel_indices], dtype=np.float64)
+            flattened = extras.reshape(-1, len(normalized_channel_indices))
             sum_values = flattened.sum(axis=0)
             sq_values = np.square(flattened).sum(axis=0)
 
@@ -94,7 +109,7 @@ class VisibleChannelNormalizer:
                 accum_sq += sq_values
             count += flattened.shape[0]
 
-        if accum_sum is None or count == 0 or extra_channels is None:
+        if accum_sum is None or count == 0 or normalized_channel_indices is None:
             self.means = np.empty(0, dtype=np.float32)
             self.stds = np.empty(0, dtype=np.float32)
             return self
@@ -110,15 +125,25 @@ class VisibleChannelNormalizer:
         if not self.enabled:
             return tensor
 
-        if tensor.shape[-3] <= 1:
+        if tensor.shape[-3] < self.data_channels:
+            raise ValueError(
+                f"Expected at least {self.data_channels} observed channels, got {tensor.shape[-3]}."
+            )
+
+        normalized_channel_indices = [index for index in range(self.data_channels) if index != self.primary_channel]
+        if not normalized_channel_indices:
             return tensor
 
         means = torch.as_tensor(self.means, dtype=tensor.dtype, device=tensor.device)
         stds = torch.as_tensor(self.stds, dtype=tensor.dtype, device=tensor.device)
         if tensor.ndim == 3:
-            tensor[1:] = (tensor[1:] - means[:, None, None]) / stds[:, None, None]
+            tensor[normalized_channel_indices] = (
+                tensor[normalized_channel_indices] - means[:, None, None]
+            ) / stds[:, None, None]
         elif tensor.ndim == 4:
-            tensor[:, 1:] = (tensor[:, 1:] - means[None, :, None, None]) / stds[None, :, None, None]
+            tensor[:, normalized_channel_indices] = (
+                tensor[:, normalized_channel_indices] - means[None, :, None, None]
+            ) / stds[None, :, None, None]
         else:
             raise ValueError(f"Unsupported tensor rank for normalization: {tensor.ndim}")
         return tensor
@@ -127,6 +152,8 @@ class VisibleChannelNormalizer:
         return {
             "means": None if self.means is None else self.means.tolist(),
             "stds": None if self.stds is None else self.stds.tolist(),
+            "data_channels": self.data_channels,
+            "primary_channel": self.primary_channel,
         }
 
     @classmethod
@@ -136,6 +163,8 @@ class VisibleChannelNormalizer:
         return cls(
             means=None if means is None else np.asarray(means, dtype=np.float32),
             stds=None if stds is None else np.asarray(stds, dtype=np.float32),
+            data_channels=int(state.get("data_channels", 1)),
+            primary_channel=int(state.get("primary_channel", 0)),
         )
 
 
@@ -148,14 +177,26 @@ def validate_array_shape(array: np.ndarray, source: str = "<array>") -> None:
         raise ValueError(f"{source} must contain at least 1 feature channel, got {array.shape[-1]}.")
 
 
+def validate_data_channels(array: np.ndarray, data_channels: int, source: str = "<array>") -> None:
+    if data_channels < 1:
+        raise ValueError("data_channels must be >= 1.")
+    if array.shape[-1] != data_channels:
+        raise ValueError(
+            f"{source} must contain exactly data_channels={data_channels} observed channels, "
+            f"got {array.shape[-1]}."
+        )
+
+
 def fit_normalizer_for_train_split(
     files: Sequence[Path],
     split_ratios: Sequence[float],
     split_mode: str,
     seed: int = 0,
+    data_channels: int = 1,
+    primary_channel: int = 0,
 ) -> VisibleChannelNormalizer:
     """Fit visible auxiliary-channel stats using train-only data."""
-    normalizer = VisibleChannelNormalizer()
+    normalizer = VisibleChannelNormalizer(data_channels=data_channels, primary_channel=primary_channel)
     if not files:
         return normalizer
 
@@ -174,14 +215,16 @@ def fit_normalizer_for_train_split(
     for path in files:
         array = np.load(path, mmap_mode="r")
         validate_array_shape(array, source=str(path))
-        if array.shape[-1] <= 1:
+        validate_data_channels(array, data_channels, source=str(path))
+        normalized_channel_indices = [index for index in range(data_channels) if index != primary_channel]
+        if not normalized_channel_indices:
             continue
 
         train_count, _, _ = _split_counts(array.shape[0], split_ratios)
         if train_count <= 0:
             continue
 
-        extras = np.asarray(array[:train_count, ..., 1:], dtype=np.float64)
+        extras = np.asarray(array[:train_count, ..., normalized_channel_indices], dtype=np.float64)
         flattened = extras.reshape(-1, extras.shape[-1])
         sum_values = flattened.sum(axis=0)
         sq_values = np.square(flattened).sum(axis=0)
@@ -221,6 +264,7 @@ class NCADataset(Dataset):
         seed: int = 0,
         files: Optional[Sequence[Path]] = None,
         cache_arrays: bool = True,
+        data_channels: int = 1,
     ) -> None:
         super().__init__()
         if split not in {"train", "val", "test"}:
@@ -229,6 +273,8 @@ class NCADataset(Dataset):
             raise ValueError("split_mode must be 'within_file' or 'by_file'.")
         if min_steps < 1 or max_steps < min_steps:
             raise ValueError("Expected 1 <= min_steps <= max_steps.")
+        if data_channels < 1:
+            raise ValueError("data_channels must be >= 1.")
 
         self.data_root = Path(data_root)
         self.pattern = pattern
@@ -238,9 +284,10 @@ class NCADataset(Dataset):
         self.min_steps = int(min_steps)
         self.max_steps = int(max_steps)
         self.augment = bool(augment)
-        self.normalizer = normalizer or VisibleChannelNormalizer()
+        self.normalizer = normalizer or VisibleChannelNormalizer(data_channels=data_channels)
         self.seed = int(seed)
         self.cache_arrays = bool(cache_arrays)
+        self.data_channels = int(data_channels)
 
         if files is None:
             file_paths = discover_npy_files(self.data_root, self.pattern)
@@ -267,6 +314,7 @@ class NCADataset(Dataset):
         for file_id, path in enumerate(file_paths):
             array = np.load(path, mmap_mode="r")
             validate_array_shape(array, source=str(path))
+            validate_data_channels(array, self.data_channels, source=str(path))
             timesteps, height, width, channels = array.shape
             if reference_hwf is None:
                 reference_hwf = (height, width, channels)
@@ -290,7 +338,7 @@ class NCADataset(Dataset):
 
     @property
     def visible_channels(self) -> int:
-        return self.metadata[0].channels
+        return self.data_channels
 
     def train_files(self) -> List[Path]:
         if self.split_mode == "by_file":
@@ -441,6 +489,8 @@ def build_dataloaders(
     seed: int = 0,
     num_workers: int = 0,
     cache_arrays: bool = True,
+    data_channels: int = 1,
+    primary_channel: int = 0,
 ) -> Tuple[Dict[str, DataLoader], VisibleChannelNormalizer]:
     """Build train/val/test loaders for training and deterministic/stochastic eval."""
     root = Path(data_root)
@@ -450,6 +500,8 @@ def build_dataloaders(
         split_ratios=split_ratios,
         split_mode=split_mode,
         seed=seed,
+        data_channels=data_channels,
+        primary_channel=primary_channel,
     )
 
     eval_steps = eval_steps or {"one_step": 1, "rollout": train_steps[1], "stochastic": train_steps[1]}
@@ -510,6 +562,7 @@ def build_dataloaders(
                 seed=config["seed"],
                 files=files,
                 cache_arrays=cache_arrays,
+                data_channels=data_channels,
             )
         except ValueError:
             if name == "train":

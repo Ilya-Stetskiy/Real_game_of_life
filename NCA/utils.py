@@ -94,14 +94,17 @@ def compute_rollout_metrics(
 ) -> Dict[str, float]:
     """
     predictions: [S, B, F, H, W]
-    targets: [B, S, 1, H, W]
+    targets: [B, S, C_obs, H, W]
     """
     target_steps = targets.permute(1, 0, 2, 3, 4)
+    if not 0 <= visible_channel < target_steps.shape[2]:
+        raise ValueError(f"visible_channel={visible_channel} is out of range for targets with {target_steps.shape[2]} channels.")
     visible_predictions = predictions[:, :, visible_channel:visible_channel + 1]
-    per_step_mse = torch.mean((visible_predictions - target_steps) ** 2, dim=(1, 2, 3, 4))
+    visible_targets = target_steps[:, :, visible_channel:visible_channel + 1]
+    per_step_mse = torch.mean((visible_predictions - visible_targets) ** 2, dim=(1, 2, 3, 4))
     per_step_mass_error = []
     for step in range(visible_predictions.shape[0]):
-        per_step_mass_error.append(population_mass_error(visible_predictions[step], target_steps[step]))
+        per_step_mass_error.append(population_mass_error(visible_predictions[step], visible_targets[step]))
     mass_curve = torch.stack(per_step_mass_error)
 
     return {
@@ -119,10 +122,12 @@ def compute_stochastic_metrics(
 ) -> Dict[str, float]:
     """
     sampled_predictions: [K, S, B, F, H, W]
-    targets: [B, S, 1, H, W]
+    targets: [B, S, C_obs, H, W]
     """
+    if not 0 <= visible_channel < targets.shape[2]:
+        raise ValueError(f"visible_channel={visible_channel} is out of range for targets with {targets.shape[2]} channels.")
     visible = sampled_predictions[:, :, :, visible_channel:visible_channel + 1]
-    target_steps = targets.permute(1, 0, 2, 3, 4).unsqueeze(0)
+    target_steps = targets.permute(1, 0, 2, 3, 4)[:, :, visible_channel:visible_channel + 1].unsqueeze(0)
     mse_per_rollout = torch.mean((visible - target_steps) ** 2, dim=(1, 2, 3, 4, 5))
     ensemble_mean = visible.mean(dim=0)
     ensemble_mean_mse = torch.mean((ensemble_mean - target_steps[0]) ** 2)

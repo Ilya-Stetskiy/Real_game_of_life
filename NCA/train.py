@@ -33,17 +33,35 @@ def compute_rollout_loss(
     loss_mode: str = "hybrid",
     lambda_intermediate: float = 0.5,
     lambda_hidden_l2: float = 1e-4,
-    visible_channel: int = 0,
+    data_channels: int = 1,
+    loss_channels: str = "primary",
+    primary_channel: int = 0,
 ) -> Dict[str, torch.Tensor]:
     if loss_mode not in {"final_only", "intermediate", "hybrid"}:
         raise ValueError("loss_mode must be one of 'final_only', 'intermediate', 'hybrid'.")
+    if loss_channels not in {"primary", "all_observed"}:
+        raise ValueError("loss_channels must be one of 'primary', 'all_observed'.")
+    if data_channels < 1:
+        raise ValueError("data_channels must be >= 1.")
+    if not 0 <= primary_channel < data_channels:
+        raise ValueError("primary_channel must index one of the observed channels.")
 
     steps, batch_size = predicted_states.shape[:2]
     if targets_visible.shape[1] != steps:
         raise ValueError("predicted_states and targets_visible must share the same rollout length.")
+    if targets_visible.shape[2] != data_channels:
+        raise ValueError(
+            f"Expected targets_visible to have data_channels={data_channels}, got {targets_visible.shape[2]}."
+        )
 
-    visible_predictions = predicted_states[:, :, visible_channel:visible_channel + 1]
-    target_steps = targets_visible.permute(1, 0, 2, 3, 4)
+    if loss_channels == "primary":
+        supervised_predictions = predicted_states[:, :, primary_channel:primary_channel + 1]
+        supervised_targets = targets_visible[:, :, primary_channel:primary_channel + 1]
+    else:
+        supervised_predictions = predicted_states[:, :, :data_channels]
+        supervised_targets = targets_visible
+
+    target_steps = supervised_targets.permute(1, 0, 2, 3, 4)
     mask_steps = target_mask.permute(1, 0)
 
     per_step_losses: List[torch.Tensor] = []
@@ -51,7 +69,7 @@ def compute_rollout_loss(
         valid = mask_steps[step]
         if not torch.any(valid):
             continue
-        diff = visible_predictions[step, valid] - target_steps[step, valid]
+        diff = supervised_predictions[step, valid] - target_steps[step, valid]
         per_step_losses.append(torch.mean(diff ** 2))
 
     if not per_step_losses:
@@ -59,8 +77,8 @@ def compute_rollout_loss(
 
     final_step_indices = target_mask.sum(dim=1) - 1
     batch_indices = torch.arange(batch_size, device=predicted_states.device)
-    final_visible = visible_predictions[final_step_indices, batch_indices]
-    final_targets = targets_visible[batch_indices, final_step_indices]
+    final_visible = supervised_predictions[final_step_indices, batch_indices]
+    final_targets = supervised_targets[batch_indices, final_step_indices]
     final_loss = torch.mean((final_visible - final_targets) ** 2)
 
     if steps > 1:
@@ -69,14 +87,14 @@ def compute_rollout_loss(
             sample_last = int(final_step_indices[sample_index].item())
             if sample_last <= 0:
                 continue
-            diff = visible_predictions[:sample_last, sample_index] - target_steps[:sample_last, sample_index]
+            diff = supervised_predictions[:sample_last, sample_index] - target_steps[:sample_last, sample_index]
             intermediate_terms.append(torch.mean(diff ** 2))
         intermediate_loss = torch.stack(intermediate_terms).mean() if intermediate_terms else torch.zeros_like(final_loss)
     else:
         intermediate_loss = torch.zeros_like(final_loss)
 
-    if predicted_states.shape[2] > 1:
-        hidden_penalty = torch.mean(predicted_states[:, :, 1:] ** 2)
+    if predicted_states.shape[2] > data_channels:
+        hidden_penalty = torch.mean(predicted_states[:, :, data_channels:] ** 2)
     else:
         hidden_penalty = torch.zeros_like(final_loss)
 
@@ -116,6 +134,10 @@ def train_epoch(
     lambda_intermediate: float = 0.5,
     lambda_hidden_l2: float = 1e-4,
     grad_clip: float = 1.0,
+    data_channels: int = 1,
+    hidden_channels: int = 1,
+    loss_channels: str = "primary",
+    primary_channel: int = 0,
     show_progress: bool = False,
     progress_desc: str = "train",
 ) -> Dict[str, float]:
@@ -126,7 +148,7 @@ def train_epoch(
     for batch in iterator:
         batch = to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
-        predictions = run_rollout_batch(model, batch, stochastic=True)
+        predictions = run_rollout_batch(model, batch, stochastic=True, hidden_channels=hidden_channels)
         losses = compute_rollout_loss(
             predictions,
             batch["targets_visible"],
@@ -134,6 +156,9 @@ def train_epoch(
             loss_mode=loss_mode,
             lambda_intermediate=lambda_intermediate,
             lambda_hidden_l2=lambda_hidden_l2,
+            data_channels=data_channels,
+            loss_channels=loss_channels,
+            primary_channel=primary_channel,
         )
         losses["loss"].backward()
         clip_grad_norm_(model.parameters(), grad_clip)
@@ -156,7 +181,9 @@ def deterministic_eval(
     model: nn.Module,
     loader: Iterable[Dict[str, torch.Tensor]],
     device: torch.device,
+    data_channels: int = 1,
     hidden_channels: int = 1,
+    primary_channel: int = 0,
     show_progress: bool = False,
     progress_desc: str = "det_eval",
 ) -> Dict[str, float]:
@@ -167,7 +194,7 @@ def deterministic_eval(
     for batch in iterator:
         batch = to_device(batch, device)
         predictions = run_rollout_batch(model, batch, stochastic=False, hidden_channels=hidden_channels)
-        metrics = compute_rollout_metrics(predictions, batch["targets_visible"])
+        metrics = compute_rollout_metrics(predictions, batch["targets_visible"], visible_channel=primary_channel)
         for key in collected:
             collected[key].append(metrics[key])
 
@@ -183,7 +210,9 @@ def stochastic_eval(
     loader: Iterable[Dict[str, torch.Tensor]],
     device: torch.device,
     num_rollouts: int = 8,
+    data_channels: int = 1,
     hidden_channels: int = 1,
+    primary_channel: int = 0,
     show_progress: bool = False,
     progress_desc: str = "stoch_eval",
 ) -> Dict[str, float]:
@@ -203,7 +232,7 @@ def stochastic_eval(
         for _ in range(num_rollouts):
             predictions.append(run_rollout_batch(model, batch, stochastic=True, hidden_channels=hidden_channels))
         sampled = torch.stack(predictions, dim=0)
-        metrics = compute_stochastic_metrics(sampled, batch["targets_visible"])
+        metrics = compute_stochastic_metrics(sampled, batch["targets_visible"], visible_channel=primary_channel)
         for key in collected:
             collected[key].append(metrics[key])
 
@@ -229,6 +258,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kernel-size", type=int, default=3)
     parser.add_argument("--model-width", type=int, default=64)
     parser.add_argument("--update-prob", type=float, default=0.5)
+    parser.add_argument("--data-channels", type=int, default=1)
+    parser.add_argument("--hidden-channels", type=int, default=1)
+    parser.add_argument("--primary-channel", type=int, default=0)
+    parser.add_argument("--loss-channels", type=str, default="primary", choices=["primary", "all_observed"])
     parser.add_argument("--loss-mode", type=str, default="hybrid", choices=["final_only", "intermediate", "hybrid"])
     parser.add_argument("--lambda-intermediate", type=float, default=0.5)
     parser.add_argument("--lambda-hidden-l2", type=float, default=1e-4)
@@ -258,14 +291,17 @@ def main() -> None:
         eval_batch_size=args.batch_size,
         seed=args.seed,
         num_workers=args.num_workers,
+        data_channels=args.data_channels,
+        primary_channel=args.primary_channel,
     )
 
     model = NCA(
-        state_channels=2,
+        state_channels=args.data_channels + args.hidden_channels,
         model_width=args.model_width,
         kernel_size=args.kernel_size,
         update_prob=args.update_prob,
         use_alive_mask=args.use_alive_mask,
+        primary_channel=args.primary_channel,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -285,15 +321,44 @@ def main() -> None:
             lambda_intermediate=args.lambda_intermediate,
             lambda_hidden_l2=args.lambda_hidden_l2,
             grad_clip=args.grad_clip,
+            data_channels=args.data_channels,
+            hidden_channels=args.hidden_channels,
+            loss_channels=args.loss_channels,
+            primary_channel=args.primary_channel,
         )
-        det_one_step = deterministic_eval(model, loaders["val_one_step"], device=device) if "val_one_step" in loaders else {}
-        det_rollout = deterministic_eval(model, loaders["val_rollout"], device=device) if "val_rollout" in loaders else {}
+        det_one_step = (
+            deterministic_eval(
+                model,
+                loaders["val_one_step"],
+                device=device,
+                data_channels=args.data_channels,
+                hidden_channels=args.hidden_channels,
+                primary_channel=args.primary_channel,
+            )
+            if "val_one_step" in loaders
+            else {}
+        )
+        det_rollout = (
+            deterministic_eval(
+                model,
+                loaders["val_rollout"],
+                device=device,
+                data_channels=args.data_channels,
+                hidden_channels=args.hidden_channels,
+                primary_channel=args.primary_channel,
+            )
+            if "val_rollout" in loaders
+            else {}
+        )
         stochastic_metrics = (
             stochastic_eval(
                 model,
                 loaders["val_rollout"],
                 device=device,
                 num_rollouts=args.num_rollouts,
+                data_channels=args.data_channels,
+                hidden_channels=args.hidden_channels,
+                primary_channel=args.primary_channel,
             )
             if "val_rollout" in loaders
             else {}

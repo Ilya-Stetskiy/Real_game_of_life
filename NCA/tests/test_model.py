@@ -33,3 +33,20 @@ def test_alive_mask_uses_visible_channel_and_gates_hidden() -> None:
     x[:, 0, 2, 2] = 1.0
     output = model(x, stochastic=False)
     assert output[:, 0].sum() > 0
+
+
+def test_alive_mask_can_use_nonzero_primary_channel() -> None:
+    model = NCA(
+        state_channels=3,
+        model_width=8,
+        kernel_size=3,
+        update_prob=1.0,
+        use_alive_mask=True,
+        primary_channel=1,
+    )
+    x = torch.zeros(1, 3, 5, 5)
+    x[:, 1, 2, 2] = 1.0
+    x[:, 2] = 2.0
+
+    output = model(x, stochastic=False)
+    assert output[:, 1].sum() > 0

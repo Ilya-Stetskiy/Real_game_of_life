@@ -54,6 +54,33 @@ def test_compute_rollout_loss_modes() -> None:
     assert torch.isclose(losses["loss"], torch.tensor(0.25 + 0.5 * 0.625 + 0.1 * 4.0))
 
 
+def test_compute_rollout_loss_all_observed_channels() -> None:
+    predicted = torch.zeros(2, 1, 4, 2, 2)
+    targets = torch.zeros(1, 2, 2, 2, 2)
+    target_mask = torch.ones(1, 2, dtype=torch.bool)
+
+    predicted[:, :, 0] = 1.0
+    predicted[:, :, 1] = 3.0
+    predicted[:, :, 2:] = 5.0
+    targets[:, :, 0] = 0.0
+    targets[:, :, 1] = 1.0
+
+    losses = compute_rollout_loss(
+        predicted,
+        targets,
+        target_mask,
+        loss_mode="final_only",
+        lambda_hidden_l2=0.1,
+        data_channels=2,
+        loss_channels="all_observed",
+        primary_channel=0,
+    )
+
+    assert torch.isclose(losses["final_loss"], torch.tensor(2.5))
+    assert torch.isclose(losses["hidden_penalty"], torch.tensor(25.0))
+    assert torch.isclose(losses["loss"], torch.tensor(5.0))
+
+
 def test_metrics_functions_return_expected_keys() -> None:
     predictions = torch.ones(2, 1, 2, 3, 3)
     targets = torch.ones(1, 2, 1, 3, 3)
@@ -122,3 +149,67 @@ def test_end_to_end_cpu_smoke(tmp_path: Path) -> None:
 
     assert triptych_path.exists()
     assert animation_path.exists()
+
+
+def test_end_to_end_multichannel_smoke(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True, exist_ok=True)
+    for file_id in range(3):
+        frames = np.zeros((12, 5, 5, 2), dtype=np.float32)
+        frames[0, 2, 2, 0] = 1.0 + file_id * 0.1
+        frames[..., 1] = 0.25 + file_id * 0.05
+        for step in range(1, frames.shape[0]):
+            prev = frames[step - 1, ..., 0]
+            frames[step, ..., 0] = np.clip(0.8 * prev + 0.1, 0.0, 1.0)
+            frames[step, ..., 1] = frames[step - 1, ..., 1] + 0.02
+        np.save(data_root / f"multi_{file_id}.npy", frames)
+
+    loaders, _ = build_dataloaders(
+        data_root=data_root,
+        pattern="*.npy",
+        split_mode="within_file",
+        split_ratios=(0.6, 0.2, 0.2),
+        train_steps=(2, 3),
+        eval_steps={"one_step": 1, "rollout": 2, "stochastic": 2},
+        batch_size=2,
+        eval_batch_size=2,
+        seed=9,
+        data_channels=2,
+        primary_channel=0,
+    )
+
+    model = NCA(state_channels=4, model_width=16, kernel_size=3, update_prob=0.5, primary_channel=0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    device = torch.device("cpu")
+
+    train_metrics = train_epoch(
+        model,
+        loaders["train"],
+        optimizer,
+        device=device,
+        data_channels=2,
+        hidden_channels=2,
+        loss_channels="all_observed",
+        primary_channel=0,
+    )
+    det_metrics = deterministic_eval(
+        model,
+        loaders["val_rollout"],
+        device=device,
+        data_channels=2,
+        hidden_channels=2,
+        primary_channel=0,
+    )
+    stoch_metrics = stochastic_eval(
+        model,
+        loaders["val_rollout"],
+        device=device,
+        num_rollouts=2,
+        data_channels=2,
+        hidden_channels=2,
+        primary_channel=0,
+    )
+
+    assert train_metrics["loss"] >= 0.0
+    assert det_metrics["rollout_mse"] >= 0.0
+    assert stoch_metrics["expected_mse"] >= 0.0

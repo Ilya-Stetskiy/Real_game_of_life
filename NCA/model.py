@@ -16,6 +16,7 @@ class NCA(nn.Module):
         update_prob: float = 0.5,
         use_alive_mask: bool = False,
         alive_threshold: float = 0.1,
+        primary_channel: int = 0,
     ) -> None:
         super().__init__()
         if state_channels < 1:
@@ -24,6 +25,8 @@ class NCA(nn.Module):
             raise ValueError("kernel_size must be odd.")
         if not 0.0 < update_prob <= 1.0:
             raise ValueError("update_prob must be in (0, 1].")
+        if not 0 <= primary_channel < state_channels:
+            raise ValueError("primary_channel must index one of the state channels.")
 
         self.state_channels = state_channels
         self.model_width = model_width
@@ -31,6 +34,7 @@ class NCA(nn.Module):
         self.update_prob = float(update_prob)
         self.use_alive_mask = bool(use_alive_mask)
         self.alive_threshold = float(alive_threshold)
+        self.primary_channel = int(primary_channel)
 
         padding = kernel_size // 2
         self.conv1 = nn.Conv2d(state_channels, model_width, kernel_size=kernel_size, padding=padding)
@@ -59,7 +63,7 @@ class NCA(nn.Module):
             )
 
         update_mask = self._sample_update_mask(x, stochastic=stochastic)
-        pre_alive = self._alive_mask(x[:, :1]) if self.use_alive_mask else None
+        pre_alive = self._alive_mask(x[:, self.primary_channel:self.primary_channel + 1]) if self.use_alive_mask else None
         if pre_alive is not None:
             update_mask = update_mask * pre_alive
 
@@ -67,7 +71,7 @@ class NCA(nn.Module):
         next_state = x + update_mask * delta
 
         if self.use_alive_mask:
-            post_alive = self._alive_mask(next_state[:, :1])
+            post_alive = self._alive_mask(next_state[:, self.primary_channel:self.primary_channel + 1])
             next_state = next_state * post_alive
 
         return next_state
