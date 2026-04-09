@@ -64,7 +64,7 @@ def plot_triptych(
     vmin = min(frame.min() for _, frame in figures)
     vmax = max(frame.max() for _, frame in figures)
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
     for axis, (name, frame) in zip(axes, figures):
         image = axis.imshow(frame, cmap="viridis", vmin=vmin, vmax=vmax)
         axis.set_title(name)
@@ -72,7 +72,6 @@ def plot_triptych(
     if title:
         fig.suptitle(title)
     fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.8)
-    fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     return output_path
