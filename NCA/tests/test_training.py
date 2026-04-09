@@ -6,7 +6,7 @@ import torch
 from NCA.dataset import build_dataloaders
 from NCA.model import NCA
 from NCA.train import compute_rollout_loss, deterministic_eval, stochastic_eval, train_epoch
-from NCA.utils import compute_rollout_metrics, compute_stochastic_metrics, load_checkpoint, save_checkpoint
+from NCA.utils import compute_binary_mask_metrics, compute_rollout_metrics, compute_stochastic_metrics, load_checkpoint, save_checkpoint
 from NCA.visualize import plot_triptych, save_rollout_animation
 
 
@@ -81,6 +81,39 @@ def test_compute_rollout_loss_all_observed_channels() -> None:
     assert torch.isclose(losses["loss"], torch.tensor(5.0))
 
 
+def test_compute_rollout_loss_bce_dice_prefers_confident_logits() -> None:
+    target = torch.tensor([[[[[1.0, 0.0], [0.0, 1.0]]]]])
+    mask = torch.ones(1, 1, dtype=torch.bool)
+    good = torch.tensor([[[[[6.0, -6.0], [-6.0, 6.0]]]]])
+    bad = torch.zeros_like(good)
+
+    good_losses = compute_rollout_loss(
+        good,
+        target,
+        mask,
+        supervised_loss="bce_dice",
+    )
+    bad_losses = compute_rollout_loss(
+        bad,
+        target,
+        mask,
+        supervised_loss="bce_dice",
+    )
+
+    assert good_losses["final_loss"] < bad_losses["final_loss"]
+
+
+def test_binary_mask_metrics_match_simple_case() -> None:
+    prediction = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+    target = torch.tensor([[[[1.0, 0.0], [0.0, 0.0]]]])
+    metrics = compute_binary_mask_metrics(prediction, target, threshold=0.5)
+
+    assert np.isclose(metrics["dice"], 2.0 / 3.0)
+    assert np.isclose(metrics["iou"], 0.5)
+    assert np.isclose(metrics["precision"], 0.5)
+    assert np.isclose(metrics["recall"], 1.0)
+
+
 def test_metrics_functions_return_expected_keys() -> None:
     predictions = torch.ones(2, 1, 2, 3, 3)
     targets = torch.ones(1, 2, 1, 3, 3)
@@ -89,8 +122,8 @@ def test_metrics_functions_return_expected_keys() -> None:
     rollout_metrics = compute_rollout_metrics(predictions, targets)
     stochastic_metrics = compute_stochastic_metrics(sampled, targets)
 
-    assert {"one_step_mse", "rollout_mse", "population_mass_error"} <= rollout_metrics.keys()
-    assert {"expected_mse", "ensemble_mean_mse", "pixelwise_std_mean", "mass_std"} <= stochastic_metrics.keys()
+    assert {"one_step_mse", "rollout_mse", "population_mass_error", "dice", "iou"} <= rollout_metrics.keys()
+    assert {"expected_mse", "ensemble_mean_mse", "pixelwise_std_mean", "mass_std", "dice", "iou"} <= stochastic_metrics.keys()
 
 
 def test_end_to_end_cpu_smoke(tmp_path: Path) -> None:
@@ -120,6 +153,8 @@ def test_end_to_end_cpu_smoke(tmp_path: Path) -> None:
     assert train_metrics["loss"] >= 0.0
     assert det_metrics["rollout_mse"] >= 0.0
     assert stoch_metrics["expected_mse"] >= 0.0
+    assert 0.0 <= det_metrics["dice"] <= 1.0
+    assert 0.0 <= stoch_metrics["iou"] <= 1.0
 
     checkpoint_path = tmp_path / "checkpoint.pt"
     save_checkpoint(
@@ -191,6 +226,8 @@ def test_end_to_end_multichannel_smoke(tmp_path: Path) -> None:
         hidden_channels=2,
         loss_channels="all_observed",
         primary_channel=0,
+        supervised_loss="bce_dice",
+        bce_pos_weight=2.0,
     )
     det_metrics = deterministic_eval(
         model,
@@ -199,6 +236,7 @@ def test_end_to_end_multichannel_smoke(tmp_path: Path) -> None:
         data_channels=2,
         hidden_channels=2,
         primary_channel=0,
+        supervised_loss="bce_dice",
     )
     stoch_metrics = stochastic_eval(
         model,
@@ -208,8 +246,11 @@ def test_end_to_end_multichannel_smoke(tmp_path: Path) -> None:
         data_channels=2,
         hidden_channels=2,
         primary_channel=0,
+        supervised_loss="bce_dice",
     )
 
     assert train_metrics["loss"] >= 0.0
     assert det_metrics["rollout_mse"] >= 0.0
     assert stoch_metrics["expected_mse"] >= 0.0
+    assert 0.0 <= det_metrics["dice"] <= 1.0
+    assert 0.0 <= stoch_metrics["iou"] <= 1.0
