@@ -9,7 +9,6 @@ NCA/runs/
 *.tif
 *.tiff
 *.xml
-*.pt
 *.pth
 *.ckpt
 *.onnx
@@ -18,5 +17,5 @@ NCA/runs/
 *.hdf5
 *.npy
 *.npz
-GNN/cache/
+# GNN/cache/
 GNN/runs/
