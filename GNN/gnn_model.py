@@ -18,6 +18,7 @@ class CellGNNOutput:
     death_logits: Tensor
     node_embeddings: Tensor
     trajectory_hypotheses: Optional[Tensor] = None
+    division_horizon_logits: Optional[Tensor] = None
 
 
 class CellInteractionGNN(nn.Module):
@@ -34,12 +35,15 @@ class CellInteractionGNN(nn.Module):
         dropout: float = 0.1,
         use_temporal_state: bool = False,
         num_trajectory_hypotheses: int = 1,
+        num_division_horizons: int = 0,
     ) -> None:
         super().__init__()
         if num_message_passing_layers < 1:
             raise ValueError("num_message_passing_layers must be >= 1")
         if num_trajectory_hypotheses < 1:
             raise ValueError("num_trajectory_hypotheses must be >= 1")
+        if num_division_horizons < 0:
+            raise ValueError("num_division_horizons must be >= 0")
         if shape_dim < 1:
             raise ValueError("shape_dim must be >= 1")
 
@@ -50,6 +54,7 @@ class CellInteractionGNN(nn.Module):
         self.num_message_passing_layers = int(num_message_passing_layers)
         self.use_temporal_state = bool(use_temporal_state)
         self.num_trajectory_hypotheses = int(num_trajectory_hypotheses)
+        self.num_division_horizons = int(num_division_horizons)
 
         self.node_encoder = MLP(node_dim, hidden_dim, hidden_dim, num_layers=2, dropout=dropout, layer_norm=True)
         self.edge_encoder = MLP(edge_dim, hidden_dim, hidden_dim, num_layers=2, dropout=dropout, layer_norm=True)
@@ -64,6 +69,11 @@ class CellInteractionGNN(nn.Module):
         self.delta_shape_head = nn.Linear(hidden_dim, shape_dim)
         self.division_head = nn.Linear(hidden_dim, 1)
         self.death_head = nn.Linear(hidden_dim, 1)
+        self.division_horizon_head = (
+            nn.Linear(hidden_dim, num_division_horizons)
+            if num_division_horizons > 0
+            else None
+        )
         self.trajectory_head = (
             nn.Linear(hidden_dim, num_trajectory_hypotheses * 2)
             if num_trajectory_hypotheses > 1
@@ -94,6 +104,11 @@ class CellInteractionGNN(nn.Module):
             death_logits=self.death_head(z).squeeze(-1),
             node_embeddings=h,
             trajectory_hypotheses=hypotheses,
+            division_horizon_logits=(
+                self.division_horizon_head(z)
+                if self.division_horizon_head is not None
+                else None
+            ),
         )
 
     def _validate_data(self, data: Data) -> None:
@@ -183,12 +198,16 @@ def cell_dynamics_loss(
     valid_regression_mask: Optional[Tensor] = None,
     valid_shape_mask: Optional[Tensor] = None,
     valid_event_mask: Optional[Tensor] = None,
+    target_division_horizon: Optional[Tensor] = None,
+    valid_division_horizon_mask: Optional[Tensor] = None,
     pos_weight_division: Optional[Tensor] = None,
     pos_weight_death: Optional[Tensor] = None,
+    pos_weight_division_horizon: Optional[Tensor] = None,
     lambda_pos: float = 1.0,
     lambda_shape: float = 1.0,
     lambda_division: float = 1.0,
     lambda_death: float = 1.0,
+    lambda_division_horizon: float = 0.0,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     if output.trajectory_hypotheses is not None:
         pos_loss = best_of_k_position_loss(
@@ -212,12 +231,22 @@ def cell_dynamics_loss(
         valid_event_mask,
         pos_weight_death,
     )
+    if output.division_horizon_logits is not None and target_division_horizon is not None:
+        division_horizon_loss = masked_bce_with_logits(
+            output.division_horizon_logits,
+            target_division_horizon.float(),
+            valid_division_horizon_mask,
+            pos_weight_division_horizon,
+        )
+    else:
+        division_horizon_loss = output.death_logits.new_tensor(0.0)
 
     total = (
         lambda_pos * pos_loss
         + lambda_shape * shape_loss
         + lambda_division * division_loss
         + lambda_death * death_loss
+        + lambda_division_horizon * division_horizon_loss
     )
     return total, {
         "loss_total": total.detach(),
@@ -225,5 +254,6 @@ def cell_dynamics_loss(
         "loss_shape": shape_loss.detach(),
         "loss_division": division_loss.detach(),
         "loss_death": death_loss.detach(),
+        "loss_division_horizon": division_horizon_loss.detach(),
     }
 

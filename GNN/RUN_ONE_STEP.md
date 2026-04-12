@@ -8,6 +8,9 @@ python -m Real_game_of_life.GNN.run_full_one_step --preset server --device cuda
 
 The runner builds the graph cache if it is missing, trains the model, evaluates the
 best validation checkpoint on the test split, and writes a final report.
+The model predicts one-step position/shape dynamics plus one-step death/division
+events and division horizon events such as `division_h3`, `division_h5`, and
+`division_h10`.
 
 ## Server run
 
@@ -55,4 +58,5 @@ bash Real_game_of_life/GNN/scripts/run_one_step_server.sh \
 One-step division is a very rare event in the current split. Do not judge that
 head by accuracy alone. The useful metrics are precision, recall, F1 and average
 precision. Position and shape heads should be tracked by `pos_rmse` and
-`shape_rmse`.
+`shape_rmse`. Division horizon metrics (`division_h3_*`, `division_h5_*`,
+`division_h10_*`) are usually more informative than the one-step division head.

@@ -36,6 +36,8 @@ class TrainConfig:
     lambda_shape: float = 0.25
     lambda_division: float = 1.0
     lambda_death: float = 0.25
+    lambda_division_horizon: float = 1.0
+    division_horizons: tuple[int, ...] = (3, 5, 10)
     max_pos_weight: float = 100.0
     num_workers: int = 0
     scheduler_patience: int = 20
@@ -70,6 +72,7 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
     node_dim = int(graphs[0].x.size(-1))
     edge_dim = int(graphs[0].edge_attr.size(-1))
     shape_dim = infer_shape_dim(graphs)
+    division_horizons = infer_division_horizons(graphs, config.division_horizons)
     model = CellInteractionGNN(
         node_dim=node_dim,
         edge_dim=edge_dim,
@@ -77,10 +80,16 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
         hidden_dim=config.hidden_dim,
         num_message_passing_layers=config.layers,
         dropout=config.dropout,
+        num_division_horizons=len(division_horizons),
     ).to(device)
 
     pos_weight_division = target_pos_weight(train_graphs, "target_division", "valid_event_mask", config.max_pos_weight).to(device)
     pos_weight_death = target_pos_weight(train_graphs, "target_death", "valid_event_mask", config.max_pos_weight).to(device)
+    pos_weight_division_horizon = target_pos_weights_for_division_horizons(
+        train_graphs,
+        division_horizons,
+        config.max_pos_weight,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -125,6 +134,8 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
             config=config,
             pos_weight_division=pos_weight_division,
             pos_weight_death=pos_weight_death,
+            pos_weight_division_horizon=pos_weight_division_horizon,
+            division_horizons=division_horizons,
             scaler=scaler,
         )
         train_row = {"epoch": epoch, "phase": "train", **train_metrics}
@@ -139,6 +150,8 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
                 config=config,
                 pos_weight_division=pos_weight_division,
                 pos_weight_death=pos_weight_death,
+                pos_weight_division_horizon=pos_weight_division_horizon,
+                division_horizons=division_horizons,
                 scaler=None,
             )
             val_row = {"epoch": epoch, "phase": "val", **val_metrics}
@@ -222,6 +235,8 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
             config=config,
             pos_weight_division=pos_weight_division,
             pos_weight_death=pos_weight_death,
+            pos_weight_division_horizon=pos_weight_division_horizon,
+            division_horizons=division_horizons,
             scaler=None,
         )
         history.append({"epoch": epochs_completed, "phase": "test", **test_metrics})
@@ -235,6 +250,7 @@ def train_from_cache(config: TrainConfig) -> dict[str, Any]:
         "node_dim": node_dim,
         "edge_dim": edge_dim,
         "shape_dim": shape_dim,
+        "division_horizons": division_horizons,
         "train_graphs": len(train_graphs),
         "val_graphs": len(val_graphs),
         "test_graphs": len(test_graphs),
@@ -257,6 +273,8 @@ def run_epoch(
     config: TrainConfig,
     pos_weight_division: torch.Tensor,
     pos_weight_death: torch.Tensor,
+    pos_weight_division_horizon: torch.Tensor,
+    division_horizons: tuple[int, ...],
     scaler: torch.amp.GradScaler | None,
 ) -> dict[str, float]:
     training = optimizer is not None
@@ -279,6 +297,10 @@ def run_epoch(
         "division": [],
         "death": [],
     }
+    for horizon in division_horizons:
+        key = division_horizon_metric_name(horizon)
+        event_scores[key] = []
+        event_targets[key] = []
 
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
@@ -286,6 +308,7 @@ def run_epoch(
             batch = batch.to(device)
             with torch.amp.autocast(device_type=device.type, enabled=bool(scaler and scaler.is_enabled())):
                 output = model(batch)
+                target_division_horizon, valid_division_horizon_mask = division_horizon_tensors(batch, division_horizons)
                 loss, stats = cell_dynamics_loss(
                     output,
                     target_delta_pos=batch.target_delta_pos,
@@ -295,12 +318,16 @@ def run_epoch(
                     valid_regression_mask=batch.valid_regression_mask,
                     valid_shape_mask=batch.valid_shape_mask,
                     valid_event_mask=batch.valid_event_mask,
+                    target_division_horizon=target_division_horizon,
+                    valid_division_horizon_mask=valid_division_horizon_mask,
                     pos_weight_division=pos_weight_division,
                     pos_weight_death=pos_weight_death,
+                    pos_weight_division_horizon=pos_weight_division_horizon,
                     lambda_pos=config.lambda_pos,
                     lambda_shape=config.lambda_shape,
                     lambda_division=config.lambda_division,
                     lambda_death=config.lambda_death,
+                    lambda_division_horizon=config.lambda_division_horizon,
                 )
 
             if training:
@@ -326,7 +353,7 @@ def run_epoch(
 
             with torch.no_grad():
                 accumulate_regression_sums(output, batch, regression_sums)
-                collect_event_scores(output, batch, event_scores, event_targets)
+                collect_event_scores(output, batch, event_scores, event_targets, division_horizons)
 
     if total_nodes == 0:
         return {}
@@ -369,14 +396,33 @@ def regression_batch_metrics(output, batch) -> dict[str, float]:
     return metrics
 
 
-def collect_event_scores(output, batch, scores: dict[str, list[torch.Tensor]], targets: dict[str, list[torch.Tensor]]) -> None:
+def collect_event_scores(
+    output,
+    batch,
+    scores: dict[str, list[torch.Tensor]],
+    targets: dict[str, list[torch.Tensor]],
+    division_horizons: tuple[int, ...],
+) -> None:
     valid_event = batch.valid_event_mask.bool()
-    if int(valid_event.sum()) == 0:
+    if int(valid_event.sum()) > 0:
+        scores["division"].append(torch.sigmoid(output.division_logits[valid_event]).detach().cpu())
+        targets["division"].append(batch.target_division[valid_event].detach().float().cpu())
+        scores["death"].append(torch.sigmoid(output.death_logits[valid_event]).detach().cpu())
+        targets["death"].append(batch.target_death[valid_event].detach().float().cpu())
+
+    if output.division_horizon_logits is None:
         return
-    scores["division"].append(torch.sigmoid(output.division_logits[valid_event]).detach().cpu())
-    targets["division"].append(batch.target_division[valid_event].detach().float().cpu())
-    scores["death"].append(torch.sigmoid(output.death_logits[valid_event]).detach().cpu())
-    targets["death"].append(batch.target_death[valid_event].detach().float().cpu())
+    for index, horizon in enumerate(division_horizons):
+        target_attr = f"target_division_within_{horizon}"
+        mask_attr = f"valid_division_within_{horizon}"
+        if not hasattr(batch, target_attr) or not hasattr(batch, mask_attr):
+            continue
+        mask = getattr(batch, mask_attr).bool()
+        if int(mask.sum()) == 0:
+            continue
+        key = division_horizon_metric_name(horizon)
+        scores[key].append(torch.sigmoid(output.division_horizon_logits[:, index][mask]).detach().cpu())
+        targets[key].append(getattr(batch, target_attr)[mask].detach().float().cpu())
 
 
 def epoch_event_metrics(
@@ -384,7 +430,7 @@ def epoch_event_metrics(
     targets: dict[str, list[torch.Tensor]],
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
-    for name in ("division", "death"):
+    for name in sorted(scores):
         if not scores[name]:
             continue
         score = torch.cat(scores[name])
@@ -455,6 +501,35 @@ def infer_shape_dim(graphs: list[Any]) -> int:
     raise ValueError("Graphs do not contain non-empty target_delta_shape.")
 
 
+def infer_division_horizons(graphs: list[Any], requested_horizons: tuple[int, ...]) -> tuple[int, ...]:
+    available: list[int] = []
+    for horizon in requested_horizons:
+        target_attr = f"target_division_within_{horizon}"
+        mask_attr = f"valid_division_within_{horizon}"
+        if any(hasattr(graph, target_attr) and hasattr(graph, mask_attr) for graph in graphs):
+            available.append(int(horizon))
+    return tuple(available)
+
+
+def division_horizon_tensors(batch: Any, horizons: tuple[int, ...]) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if not horizons:
+        return None, None
+    targets: list[torch.Tensor] = []
+    masks: list[torch.Tensor] = []
+    for horizon in horizons:
+        target_attr = f"target_division_within_{horizon}"
+        mask_attr = f"valid_division_within_{horizon}"
+        if not hasattr(batch, target_attr) or not hasattr(batch, mask_attr):
+            raise ValueError(f"Batch is missing division horizon target or mask for horizon={horizon}")
+        targets.append(getattr(batch, target_attr).float())
+        masks.append(getattr(batch, mask_attr).bool())
+    return torch.stack(targets, dim=1), torch.stack(masks, dim=1)
+
+
+def division_horizon_metric_name(horizon: int) -> str:
+    return f"division_h{int(horizon)}"
+
+
 def target_pos_weight(graphs: list[Any], target_attr: str, mask_attr: str, max_pos_weight: float) -> torch.Tensor:
     positives = 0.0
     total = 0.0
@@ -469,6 +544,25 @@ def target_pos_weight(graphs: list[Any], target_attr: str, mask_attr: str, max_p
     else:
         weight = negatives / positives
     return torch.tensor(min(float(weight), float(max_pos_weight)), dtype=torch.float32)
+
+
+def target_pos_weights_for_division_horizons(
+    graphs: list[Any],
+    horizons: tuple[int, ...],
+    max_pos_weight: float,
+) -> torch.Tensor:
+    weights = [
+        target_pos_weight(
+            graphs,
+            f"target_division_within_{horizon}",
+            f"valid_division_within_{horizon}",
+            max_pos_weight,
+        )
+        for horizon in horizons
+    ]
+    if not weights:
+        return torch.empty(0, dtype=torch.float32)
+    return torch.stack(weights)
 
 
 def save_checkpoint(
@@ -604,6 +698,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lambda-shape", type=float, default=TrainConfig().lambda_shape)
     parser.add_argument("--lambda-division", type=float, default=TrainConfig().lambda_division)
     parser.add_argument("--lambda-death", type=float, default=TrainConfig().lambda_death)
+    parser.add_argument("--lambda-division-horizon", type=float, default=TrainConfig().lambda_division_horizon)
+    parser.add_argument("--division-horizons", type=int, nargs="*", default=list(TrainConfig().division_horizons))
     parser.add_argument("--max-pos-weight", type=float, default=TrainConfig().max_pos_weight)
     parser.add_argument("--grad-clip-norm", type=float, default=TrainConfig().grad_clip_norm)
     parser.add_argument("--num-workers", type=int, default=TrainConfig().num_workers)
@@ -641,6 +737,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         lambda_shape=args.lambda_shape,
         lambda_division=args.lambda_division,
         lambda_death=args.lambda_death,
+        lambda_division_horizon=args.lambda_division_horizon,
+        division_horizons=tuple(args.division_horizons),
         max_pos_weight=args.max_pos_weight,
         num_workers=args.num_workers,
         scheduler_patience=args.scheduler_patience,

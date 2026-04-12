@@ -25,6 +25,7 @@ PRESET_OVERRIDES: dict[str, dict[str, Any]] = {
         "layers": 1,
         "dropout": 0.0,
         "learning_rate": 1e-3,
+        "lambda_division_horizon": 1.0,
         "checkpoint_every": 0,
         "early_stopping_patience": 0,
         "num_workers": 0,
@@ -37,6 +38,7 @@ PRESET_OVERRIDES: dict[str, dict[str, Any]] = {
         "layers": 4,
         "dropout": 0.1,
         "learning_rate": 1e-3,
+        "lambda_division_horizon": 1.0,
         "checkpoint_every": 10,
         "early_stopping_patience": 25,
         "num_workers": 2,
@@ -53,7 +55,8 @@ PRESET_OVERRIDES: dict[str, dict[str, Any]] = {
         "grad_clip_norm": 1.0,
         "lambda_pos": 1.0,
         "lambda_shape": 0.25,
-        "lambda_division": 2.0,
+        "lambda_division": 0.5,
+        "lambda_division_horizon": 1.0,
         "lambda_death": 0.5,
         "max_pos_weight": 100.0,
         "scheduler_patience": 20,
@@ -76,7 +79,8 @@ PRESET_OVERRIDES: dict[str, dict[str, Any]] = {
         "grad_clip_norm": 1.0,
         "lambda_pos": 1.0,
         "lambda_shape": 0.25,
-        "lambda_division": 2.0,
+        "lambda_division": 0.25,
+        "lambda_division_horizon": 1.0,
         "lambda_death": 0.5,
         "max_pos_weight": 100.0,
         "scheduler_patience": 30,
@@ -268,6 +272,7 @@ def write_final_report(path: Path, summary: dict[str, Any]) -> None:
         metric_line("division_tp", test),
         metric_line("division_fp", test),
         metric_line("division_fn", test),
+        *division_horizon_metric_lines(train.get("division_horizons") or (), test),
         metric_line("death_precision", test),
         metric_line("death_recall", test),
         metric_line("death_f1", test),
@@ -293,6 +298,24 @@ def write_final_report(path: Path, summary: dict[str, Any]) -> None:
 
 def metric_line(name: str, metrics: dict[str, Any]) -> str:
     return f"- `{name}`: `{format_float(metrics.get(name))}`"
+
+
+def division_horizon_metric_lines(horizons: Iterable[int], metrics: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for horizon in horizons:
+        prefix = f"division_h{int(horizon)}"
+        lines.extend(
+            [
+                metric_line(f"{prefix}_precision", metrics),
+                metric_line(f"{prefix}_recall", metrics),
+                metric_line(f"{prefix}_f1", metrics),
+                metric_line(f"{prefix}_ap", metrics),
+                metric_line(f"{prefix}_tp", metrics),
+                metric_line(f"{prefix}_fp", metrics),
+                metric_line(f"{prefix}_fn", metrics),
+            ]
+        )
+    return lines
 
 
 def format_float(value: Any) -> str:
@@ -348,6 +371,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lambda-pos", type=float, default=None)
     parser.add_argument("--lambda-shape", type=float, default=None)
     parser.add_argument("--lambda-division", type=float, default=None)
+    parser.add_argument("--lambda-division-horizon", type=float, default=None)
+    parser.add_argument("--division-horizons", type=int, nargs="*", default=None)
     parser.add_argument("--lambda-death", type=float, default=None)
     parser.add_argument("--max-pos-weight", type=float, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
@@ -378,6 +403,8 @@ def train_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "lambda_pos": args.lambda_pos,
         "lambda_shape": args.lambda_shape,
         "lambda_division": args.lambda_division,
+        "lambda_division_horizon": args.lambda_division_horizon,
+        "division_horizons": tuple(args.division_horizons) if args.division_horizons is not None else None,
         "lambda_death": args.lambda_death,
         "max_pos_weight": args.max_pos_weight,
         "num_workers": args.num_workers,
