@@ -1,0 +1,8 @@
+filename: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177/HeLa-S3_nuc_pos14_q3_5c.trk
+experiment: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177
+specimen: HeLa
+pixel_size: [0.65]
+time_step: ['6 min']
+screening_passed: ['Not screened']
+frames: 42
+frame_indices: [1470, 1471, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1481, 1482, 1483, 1484, 1485, 1486, 1487, 1488, 1489, 1490, 1491, 1492, 1493, 1494, 1495, 1496, 1497, 1498, 1499, 1500, 1501, 1502, 1503, 1504, 1505, 1506, 1507, 1508, 1509, 1510, 1511]

@@ -1,0 +1,661 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import random
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+import torch
+from torch import nn
+from torch_geometric.loader import DataLoader
+
+from .dataset_cache import DEFAULT_CACHE_PATH, build_and_save_graph_cache, load_graph_cache
+from .gnn_model import CellInteractionGNN, cell_dynamics_loss
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    cache_path: Path = DEFAULT_CACHE_PATH
+    out_dir: Path = Path(__file__).resolve().parent / "runs" / "one_step_baseline"
+    epochs: int = 20
+    batch_size: int = 16
+    hidden_dim: int = 128
+    layers: int = 4
+    dropout: float = 0.1
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    grad_clip_norm: float = 1.0
+    seed: int = 17
+    device: str = "auto"
+    lambda_pos: float = 1.0
+    lambda_shape: float = 0.25
+    lambda_division: float = 1.0
+    lambda_death: float = 0.25
+    max_pos_weight: float = 100.0
+    num_workers: int = 0
+    scheduler_patience: int = 20
+    scheduler_factor: float = 0.5
+    min_learning_rate: float = 1e-6
+    early_stopping_patience: int = 0
+    min_delta: float = 0.0
+    checkpoint_every: int = 0
+    resume_from: Path | None = None
+    amp: bool = False
+
+
+def train_from_cache(config: TrainConfig) -> dict[str, Any]:
+    set_seed(config.seed)
+    cache = load_graph_cache(config.cache_path)
+    graphs = cache["graphs"]
+    splits = cache["splits"]
+    if not graphs:
+        raise ValueError("Graph cache is empty.")
+
+    split_graphs = {
+        name: [graphs[index] for index in indices]
+        for name, indices in splits.items()
+    }
+    train_graphs = split_graphs.get("train", [])
+    val_graphs = split_graphs.get("val", [])
+    test_graphs = split_graphs.get("test", [])
+    if not train_graphs:
+        raise ValueError("Train split is empty.")
+
+    device = resolve_device(config.device)
+    node_dim = int(graphs[0].x.size(-1))
+    edge_dim = int(graphs[0].edge_attr.size(-1))
+    shape_dim = infer_shape_dim(graphs)
+    model = CellInteractionGNN(
+        node_dim=node_dim,
+        edge_dim=edge_dim,
+        shape_dim=shape_dim,
+        hidden_dim=config.hidden_dim,
+        num_message_passing_layers=config.layers,
+        dropout=config.dropout,
+    ).to(device)
+
+    pos_weight_division = target_pos_weight(train_graphs, "target_division", "valid_event_mask", config.max_pos_weight).to(device)
+    pos_weight_death = target_pos_weight(train_graphs, "target_death", "valid_event_mask", config.max_pos_weight).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=config.scheduler_factor,
+        patience=config.scheduler_patience,
+        min_lr=config.min_learning_rate,
+    )
+    use_amp = config.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    loaders = {
+        "train": make_loader(train_graphs, config, shuffle=True),
+        "val": make_loader(val_graphs, config, shuffle=False) if val_graphs else None,
+        "test": make_loader(test_graphs, config, shuffle=False) if test_graphs else None,
+    }
+
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    history: list[dict[str, Any]] = []
+    best_metric = float("inf")
+    best_epoch = 0
+    start_epoch = 1
+    if config.resume_from is not None:
+        start_epoch, best_epoch, best_metric, history = load_training_state(
+            config.resume_from,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            device=device,
+        )
+
+    epochs_without_improvement = 0
+    epochs_completed = start_epoch - 1
+
+    for epoch in range(start_epoch, config.epochs + 1):
+        train_metrics = run_epoch(
+            model,
+            loaders["train"],
+            device=device,
+            optimizer=optimizer,
+            config=config,
+            pos_weight_division=pos_weight_division,
+            pos_weight_death=pos_weight_death,
+            scaler=scaler,
+        )
+        train_row = {"epoch": epoch, "phase": "train", **train_metrics}
+        history.append(train_row)
+
+        if loaders["val"] is not None:
+            val_metrics = run_epoch(
+                model,
+                loaders["val"],
+                device=device,
+                optimizer=None,
+                config=config,
+                pos_weight_division=pos_weight_division,
+                pos_weight_death=pos_weight_death,
+                scaler=None,
+            )
+            val_row = {"epoch": epoch, "phase": "val", **val_metrics}
+            history.append(val_row)
+            selection_metric = val_metrics["loss_total"]
+        else:
+            selection_metric = train_metrics["loss_total"]
+
+        scheduler.step(selection_metric)
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        train_row["learning_rate"] = current_lr
+        if loaders["val"] is not None:
+            val_row["learning_rate"] = current_lr
+
+        if selection_metric < best_metric - config.min_delta:
+            best_metric = float(selection_metric)
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            save_checkpoint(
+                config.out_dir / "best.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                config,
+                cache,
+                epoch,
+                history,
+                best_metric,
+            )
+        else:
+            epochs_without_improvement += 1
+
+        save_checkpoint(
+            config.out_dir / "last.pt",
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+            config,
+            cache,
+            epoch,
+            history,
+            best_metric,
+        )
+        if config.checkpoint_every > 0 and epoch % config.checkpoint_every == 0:
+            save_checkpoint(
+                config.out_dir / f"epoch_{epoch:04d}.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                config,
+                cache,
+                epoch,
+                history,
+                best_metric,
+            )
+        write_history(history, config.out_dir)
+        print_epoch(epoch, train_metrics, history[-1] if history[-1]["phase"] == "val" else None)
+        epochs_completed = epoch
+
+        if config.early_stopping_patience > 0 and epochs_without_improvement >= config.early_stopping_patience:
+            print(
+                "early_stopping "
+                f"epoch={epoch} best_epoch={best_epoch} best_metric={best_metric:.6f}"
+            )
+            break
+
+    test_metrics = None
+    if loaders["test"] is not None:
+        best_path = config.out_dir / "best.pt"
+        if best_path.exists():
+            best_checkpoint = torch.load(best_path, map_location=device, weights_only=False)
+            model.load_state_dict(best_checkpoint["model_state"])
+        test_metrics = run_epoch(
+            model,
+            loaders["test"],
+            device=device,
+            optimizer=None,
+            config=config,
+            pos_weight_division=pos_weight_division,
+            pos_weight_death=pos_weight_death,
+            scaler=None,
+        )
+        history.append({"epoch": epochs_completed, "phase": "test", **test_metrics})
+        write_history(history, config.out_dir)
+
+    run_summary = {
+        "best_epoch": best_epoch,
+        "best_metric": best_metric,
+        "epochs_completed": epochs_completed,
+        "test_metrics": test_metrics,
+        "node_dim": node_dim,
+        "edge_dim": edge_dim,
+        "shape_dim": shape_dim,
+        "train_graphs": len(train_graphs),
+        "val_graphs": len(val_graphs),
+        "test_graphs": len(test_graphs),
+        "config": jsonable(asdict(config)),
+        "cache_summary": cache.get("summary", {}),
+    }
+    (config.out_dir / "run_summary.json").write_text(
+        json.dumps(jsonable(run_summary), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {"history": history, "summary": run_summary, "model": model}
+
+
+def run_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+    optimizer: torch.optim.Optimizer | None,
+    config: TrainConfig,
+    pos_weight_division: torch.Tensor,
+    pos_weight_death: torch.Tensor,
+    scaler: torch.amp.GradScaler | None,
+) -> dict[str, float]:
+    training = optimizer is not None
+    model.train(training)
+    totals: dict[str, float] = {}
+    total_nodes = 0
+    total_graphs = 0
+    start_time = time.perf_counter()
+    regression_sums = {
+        "pos_sq_error": 0.0,
+        "pos_count": 0,
+        "shape_sq_error": 0.0,
+        "shape_count": 0,
+    }
+    event_scores: dict[str, list[torch.Tensor]] = {
+        "division": [],
+        "death": [],
+    }
+    event_targets: dict[str, list[torch.Tensor]] = {
+        "division": [],
+        "death": [],
+    }
+
+    context = torch.enable_grad() if training else torch.no_grad()
+    with context:
+        for batch in loader:
+            batch = batch.to(device)
+            with torch.amp.autocast(device_type=device.type, enabled=bool(scaler and scaler.is_enabled())):
+                output = model(batch)
+                loss, stats = cell_dynamics_loss(
+                    output,
+                    target_delta_pos=batch.target_delta_pos,
+                    target_delta_shape=batch.target_delta_shape,
+                    target_division=batch.target_division,
+                    target_death=batch.target_death,
+                    valid_regression_mask=batch.valid_regression_mask,
+                    valid_shape_mask=batch.valid_shape_mask,
+                    valid_event_mask=batch.valid_event_mask,
+                    pos_weight_division=pos_weight_division,
+                    pos_weight_death=pos_weight_death,
+                    lambda_pos=config.lambda_pos,
+                    lambda_shape=config.lambda_shape,
+                    lambda_division=config.lambda_division,
+                    lambda_death=config.lambda_death,
+                )
+
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    if config.grad_clip_norm > 0:
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if config.grad_clip_norm > 0:
+                        nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip_norm)
+                    optimizer.step()
+
+            weight = int(batch.num_nodes)
+            total_nodes += weight
+            total_graphs += int(getattr(batch, "num_graphs", 1))
+            for key, value in stats.items():
+                totals[key] = totals.get(key, 0.0) + float(value.item()) * weight
+
+            with torch.no_grad():
+                accumulate_regression_sums(output, batch, regression_sums)
+                collect_event_scores(output, batch, event_scores, event_targets)
+
+    if total_nodes == 0:
+        return {}
+    metrics = {key: value / total_nodes for key, value in sorted(totals.items())}
+    if regression_sums["pos_count"] > 0:
+        metrics["pos_rmse"] = float((regression_sums["pos_sq_error"] / regression_sums["pos_count"]) ** 0.5)
+    if regression_sums["shape_count"] > 0:
+        metrics["shape_rmse"] = float((regression_sums["shape_sq_error"] / regression_sums["shape_count"]) ** 0.5)
+    metrics.update(epoch_event_metrics(event_scores, event_targets))
+    seconds = max(time.perf_counter() - start_time, 1e-9)
+    metrics["epoch_seconds"] = float(seconds)
+    metrics["nodes_per_second"] = float(total_nodes / seconds)
+    metrics["graphs_per_second"] = float(total_graphs / seconds)
+    return metrics
+
+
+def accumulate_regression_sums(output, batch, sums: dict[str, float | int]) -> None:
+    valid_reg = batch.valid_regression_mask.bool()
+    if int(valid_reg.sum()) > 0:
+        error = output.delta_pos[valid_reg] - batch.target_delta_pos[valid_reg]
+        sums["pos_sq_error"] = float(sums["pos_sq_error"]) + float((error ** 2).sum().item())
+        sums["pos_count"] = int(sums["pos_count"]) + int(error.numel())
+    valid_shape = batch.valid_shape_mask.bool()
+    if int(valid_shape.sum()) > 0:
+        error = output.delta_shape[valid_shape] - batch.target_delta_shape[valid_shape]
+        sums["shape_sq_error"] = float(sums["shape_sq_error"]) + float((error ** 2).sum().item())
+        sums["shape_count"] = int(sums["shape_count"]) + int(error.numel())
+
+
+def regression_batch_metrics(output, batch) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    valid_reg = batch.valid_regression_mask.bool()
+    if int(valid_reg.sum()) > 0:
+        pos_mse = ((output.delta_pos[valid_reg] - batch.target_delta_pos[valid_reg]) ** 2).mean()
+        metrics["pos_rmse"] = float(torch.sqrt(pos_mse).item())
+    valid_shape = batch.valid_shape_mask.bool()
+    if int(valid_shape.sum()) > 0:
+        shape_mse = ((output.delta_shape[valid_shape] - batch.target_delta_shape[valid_shape]) ** 2).mean()
+        metrics["shape_rmse"] = float(torch.sqrt(shape_mse).item())
+    return metrics
+
+
+def collect_event_scores(output, batch, scores: dict[str, list[torch.Tensor]], targets: dict[str, list[torch.Tensor]]) -> None:
+    valid_event = batch.valid_event_mask.bool()
+    if int(valid_event.sum()) == 0:
+        return
+    scores["division"].append(torch.sigmoid(output.division_logits[valid_event]).detach().cpu())
+    targets["division"].append(batch.target_division[valid_event].detach().float().cpu())
+    scores["death"].append(torch.sigmoid(output.death_logits[valid_event]).detach().cpu())
+    targets["death"].append(batch.target_death[valid_event].detach().float().cpu())
+
+
+def epoch_event_metrics(
+    scores: dict[str, list[torch.Tensor]],
+    targets: dict[str, list[torch.Tensor]],
+) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for name in ("division", "death"):
+        if not scores[name]:
+            continue
+        score = torch.cat(scores[name])
+        target = torch.cat(targets[name]).bool()
+        metrics.update(binary_classification_metrics(name, score, target))
+    return metrics
+
+
+def binary_classification_metrics(prefix: str, score: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+    pred = score >= 0.5
+    tp = int((pred & target).sum().item())
+    fp = int((pred & ~target).sum().item())
+    fn = int((~pred & target).sum().item())
+    tn = int((~pred & ~target).sum().item())
+    total = tp + fp + fn + tn
+
+    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    accuracy = (tp + tn) / total if total > 0 else 0.0
+    positive_rate = (tp + fn) / total if total > 0 else 0.0
+    predicted_positive_rate = (tp + fp) / total if total > 0 else 0.0
+    average_precision = binary_average_precision(score, target)
+
+    return {
+        f"{prefix}_acc": float(accuracy),
+        f"{prefix}_precision": float(precision),
+        f"{prefix}_recall": float(recall),
+        f"{prefix}_f1": float(f1),
+        f"{prefix}_ap": float(average_precision),
+        f"{prefix}_positive_rate": float(positive_rate),
+        f"{prefix}_predicted_positive_rate": float(predicted_positive_rate),
+        f"{prefix}_tp": float(tp),
+        f"{prefix}_fp": float(fp),
+        f"{prefix}_fn": float(fn),
+        f"{prefix}_tn": float(tn),
+    }
+
+
+def binary_average_precision(score: torch.Tensor, target: torch.Tensor) -> float:
+    target = target.bool()
+    positives = int(target.sum().item())
+    if positives == 0:
+        return 0.0
+    order = torch.argsort(score, descending=True)
+    sorted_target = target[order].float()
+    true_positives = torch.cumsum(sorted_target, dim=0)
+    ranks = torch.arange(1, sorted_target.numel() + 1, dtype=torch.float32)
+    precision_at_rank = true_positives / ranks
+    ap = (precision_at_rank * sorted_target).sum() / positives
+    return float(ap.item())
+
+
+def make_loader(graphs: list[Any], config: TrainConfig, *, shuffle: bool) -> DataLoader:
+    return DataLoader(
+        graphs,
+        batch_size=config.batch_size,
+        shuffle=shuffle,
+        num_workers=config.num_workers,
+    )
+
+
+def infer_shape_dim(graphs: list[Any]) -> int:
+    for graph in graphs:
+        target = getattr(graph, "target_delta_shape", None)
+        if target is not None and target.dim() == 2 and target.size(-1) > 0:
+            return int(target.size(-1))
+    raise ValueError("Graphs do not contain non-empty target_delta_shape.")
+
+
+def target_pos_weight(graphs: list[Any], target_attr: str, mask_attr: str, max_pos_weight: float) -> torch.Tensor:
+    positives = 0.0
+    total = 0.0
+    for graph in graphs:
+        target = getattr(graph, target_attr)
+        mask = getattr(graph, mask_attr).bool()
+        positives += float(target[mask].sum().item())
+        total += float(mask.sum().item())
+    negatives = max(0.0, total - positives)
+    if positives <= 0:
+        weight = 1.0
+    else:
+        weight = negatives / positives
+    return torch.tensor(min(float(weight), float(max_pos_weight)), dtype=torch.float32)
+
+
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+    scaler: torch.amp.GradScaler,
+    config: TrainConfig,
+    cache: dict[str, Any],
+    epoch: int,
+    history: list[dict[str, Any]],
+    best_metric: float,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "best_metric": best_metric,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "scaler_state": scaler.state_dict(),
+            "train_config": jsonable(asdict(config)),
+            "cache_summary": cache.get("summary", {}),
+            "dataset_config": cache.get("dataset_config", {}),
+            "split_config": cache.get("split_config", {}),
+            "history": history,
+        },
+        path,
+    )
+
+
+def load_training_state(
+    path: Path,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+    scaler: torch.amp.GradScaler,
+    device: torch.device,
+) -> tuple[int, int, float, list[dict[str, Any]]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    if "scheduler_state" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+    if "scaler_state" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler_state"])
+    epoch = int(checkpoint.get("epoch", 0))
+    best_metric = float(checkpoint.get("best_metric", float("inf")))
+    history = list(checkpoint.get("history", []))
+    best_epoch = 0
+    for row in history:
+        if row.get("phase") == "val" and float(row.get("loss_total", float("inf"))) == best_metric:
+            best_epoch = int(row.get("epoch", 0))
+            break
+    if best_epoch == 0:
+        best_epoch = epoch
+    return epoch + 1, best_epoch, best_metric, history
+
+
+def write_history(history: list[dict[str, Any]], out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "history.json"
+    csv_path = out_dir / "history.csv"
+    json_path.write_text(json.dumps(jsonable(history), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not history:
+        return
+    fieldnames = sorted({key for row in history for key in row})
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def print_epoch(epoch: int, train_metrics: dict[str, float], val_row: dict[str, Any] | None) -> None:
+    train_loss = train_metrics.get("loss_total", float("nan"))
+    text = f"epoch={epoch} train_loss={train_loss:.5f}"
+    if "pos_rmse" in train_metrics:
+        text += f" train_pos_rmse={train_metrics['pos_rmse']:.5f}"
+    if val_row is not None:
+        text += f" val_loss={val_row.get('loss_total', float('nan')):.5f}"
+    print(text)
+
+
+def resolve_device(value: str) -> torch.device:
+    if value == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(value)
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [jsonable(item) for item in value]
+    return value
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train one-step cell interaction GNN from a graph cache.")
+    parser.add_argument("--cache", type=Path, default=TrainConfig().cache_path)
+    parser.add_argument("--out-dir", type=Path, default=TrainConfig().out_dir)
+    parser.add_argument("--epochs", type=int, default=TrainConfig().epochs)
+    parser.add_argument("--batch-size", type=int, default=TrainConfig().batch_size)
+    parser.add_argument("--hidden-dim", type=int, default=TrainConfig().hidden_dim)
+    parser.add_argument("--layers", type=int, default=TrainConfig().layers)
+    parser.add_argument("--dropout", type=float, default=TrainConfig().dropout)
+    parser.add_argument("--learning-rate", type=float, default=TrainConfig().learning_rate)
+    parser.add_argument("--weight-decay", type=float, default=TrainConfig().weight_decay)
+    parser.add_argument("--device", default=TrainConfig().device)
+    parser.add_argument("--seed", type=int, default=TrainConfig().seed)
+    parser.add_argument("--lambda-pos", type=float, default=TrainConfig().lambda_pos)
+    parser.add_argument("--lambda-shape", type=float, default=TrainConfig().lambda_shape)
+    parser.add_argument("--lambda-division", type=float, default=TrainConfig().lambda_division)
+    parser.add_argument("--lambda-death", type=float, default=TrainConfig().lambda_death)
+    parser.add_argument("--max-pos-weight", type=float, default=TrainConfig().max_pos_weight)
+    parser.add_argument("--grad-clip-norm", type=float, default=TrainConfig().grad_clip_norm)
+    parser.add_argument("--num-workers", type=int, default=TrainConfig().num_workers)
+    parser.add_argument("--scheduler-patience", type=int, default=TrainConfig().scheduler_patience)
+    parser.add_argument("--scheduler-factor", type=float, default=TrainConfig().scheduler_factor)
+    parser.add_argument("--min-learning-rate", type=float, default=TrainConfig().min_learning_rate)
+    parser.add_argument("--early-stopping-patience", type=int, default=TrainConfig().early_stopping_patience)
+    parser.add_argument("--min-delta", type=float, default=TrainConfig().min_delta)
+    parser.add_argument("--checkpoint-every", type=int, default=TrainConfig().checkpoint_every)
+    parser.add_argument("--resume-from", type=Path, default=TrainConfig().resume_from)
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--build-cache-if-missing", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.build_cache_if_missing and not args.cache.exists():
+        build_and_save_graph_cache(args.cache)
+
+    config = TrainConfig(
+        cache_path=args.cache,
+        out_dir=args.out_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        hidden_dim=args.hidden_dim,
+        layers=args.layers,
+        dropout=args.dropout,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        grad_clip_norm=args.grad_clip_norm,
+        seed=args.seed,
+        device=args.device,
+        lambda_pos=args.lambda_pos,
+        lambda_shape=args.lambda_shape,
+        lambda_division=args.lambda_division,
+        lambda_death=args.lambda_death,
+        max_pos_weight=args.max_pos_weight,
+        num_workers=args.num_workers,
+        scheduler_patience=args.scheduler_patience,
+        scheduler_factor=args.scheduler_factor,
+        min_learning_rate=args.min_learning_rate,
+        early_stopping_patience=args.early_stopping_patience,
+        min_delta=args.min_delta,
+        checkpoint_every=args.checkpoint_every,
+        resume_from=args.resume_from,
+        amp=args.amp,
+    )
+    result = train_from_cache(config)
+    print(json.dumps(jsonable(result["summary"]), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
