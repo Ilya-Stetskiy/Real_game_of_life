@@ -1,8 +1,0 @@
-filename: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177/HeLa-S3_nuc_pos0_q0_5c.trk
-experiment: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177
-specimen: HeLa
-pixel_size: [0.65]
-time_step: ['6 min']
-screening_passed: ['Not screened']
-frames: 42
-frame_indices: [1050, 1051, 1052, 1053, 1054, 1055, 1056, 1057, 1058, 1059, 1060, 1061, 1062, 1063, 1064, 1065, 1066, 1067, 1068, 1069, 1070, 1071, 1072, 1073, 1074, 1075, 1076, 1077, 1078, 1079, 1080, 1081, 1082, 1083, 1084, 1085, 1086, 1087, 1088, 1089, 1090, 1091]

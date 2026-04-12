@@ -1,8 +1,0 @@
-filename: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177/HeLa-S3_nuc_pos18_q1_5c.trk
-experiment: ../../labels/dynamic/2d/HeLa-S3/journal_pcbi_1005177
-specimen: HeLa
-pixel_size: [0.65]
-time_step: ['6 min']
-screening_passed: ['Not screened']
-frames: 42
-frame_indices: [882, 883, 884, 885, 886, 887, 888, 889, 890, 891, 892, 893, 894, 895, 896, 897, 898, 899, 900, 901, 902, 903, 904, 905, 906, 907, 908, 909, 910, 911, 912, 913, 914, 915, 916, 917, 918, 919, 920, 921, 922, 923]
