@@ -2,6 +2,17 @@
 
 Этот модуль содержит минимальный, но расширяемый baseline для обучения Neural Cellular Automata (NCA) на последовательностях клеточных масок или плотностей. Основная задача: по начальному наблюдаемому состоянию предсказывать дальнейшую пространственно-временную динамику через итеративный rollout одной локальной update-функции.
 
+## Цель работы
+
+Исследовать применимость Neural Cellular Automata для моделирования
+пространственно-временной динамики клеточных масок.
+
+Основной фокус:
+- устойчивость rollout
+- способность к обобщению
+- влияние hidden state
+
+
 ## Идея подхода
 
 NCA хранит состояние каждой клетки сетки как набор каналов:
@@ -143,14 +154,15 @@ supervised_loss = "mse" | "bce" | "bce_dice"
 
 ## Сплиты и честность оценки
 
-В проекте есть два базовых режима:
+В проекте есть три базовых режима:
 
 ```text
-split_mode = "within_file" | "by_file"
+split_mode = "within_file" | "by_file" | "by_group"
 ```
 
 - `within_file` удобен для smoke-test, но часто слишком добрый: train/val берутся из одной траектории.
 - `by_file` лучше, но может быть недостаточным, если файлы связаны по имени, например `pos17_q0`, `pos17_q1`, `pos17_q2`.
+- `by_group` группирует файлы по ключу из имени. По умолчанию используется regex `pos(\d+)`, поэтому все `q*` одного `pos` попадают только в один split.
 
 Для честной оценки желательно группировать split по биологически/пространственно независимой единице, например по `pos`, чтобы все `q*` одного `pos` попадали только в один split.
 
@@ -213,15 +225,54 @@ CONFIG = {
 cd ....../Game_of_life/Real_game_of_life
 ```
 
+### Подготовка HeLa карт
+
+Новый рекомендуемый формат для масок:
+
+```text
+[T, H, W, 1]
+```
+
+Нулевые hidden channels в `.npy` хранить не нужно: они добавляются моделью через `hidden_channels`.
+
+```bash
+python3 "HeLa_Database/HeLa клетки/Обработка данных для первого тестового стенда/build_nca_maps.py" \
+  --source-root "HeLa_Database/HeLa клетки/DynamicNuclearNet/DynamicNuclearNet/tif_data" \
+  --out-root NCA/data_v2 \
+  --dataset dnn \
+  --grid-size 8 \
+  --channels density \
+  --split-policy by_group \
+  --split-ratios 0.6 0.2 0.2 \
+  --overwrite
+```
+
+Если нужны дополнительные observed channels из TrackMate:
+
+```bash
+python3 "HeLa_Database/HeLa клетки/Обработка данных для первого тестового стенда/build_nca_maps.py" \
+  --source-root "HeLa_Database/HeLa клетки/DynamicNuclearNet/DynamicNuclearNet/tif_data" \
+  --out-root NCA/data_v2_trackmate \
+  --dataset dnn \
+  --grid-size 8 \
+  --channels all \
+  --split-policy by_group \
+  --split-ratios 0.6 0.2 0.2 \
+  --overwrite
+```
+
+Конвертер пишет `manifest.jsonl`, `qc.csv` и `summary.json` рядом с массивами.
+
 ### Старый backward-compatible режим `[T,H,W,1]`
 
 ```bash
 python3 -m NCA.train \
-  --data-root NCA/data \
+  --data-root NCA/data_v2 \
   --out-dir NCA/runs/default \
   --data-channels 1 \
   --hidden-channels 1 \
   --primary-channel 0 \
+  --split-mode by_group \
   --loss-channels primary \
   --supervised-loss mse
 ```
@@ -230,11 +281,12 @@ python3 -m NCA.train \
 
 ```bash
 python3 -m NCA.train \
-  --data-root NCA/data \
+  --data-root NCA/data_v2 \
   --out-dir NCA/runs/bce_dice \
   --data-channels 1 \
   --hidden-channels 1 \
   --primary-channel 0 \
+  --split-mode by_group \
   --loss-channels primary \
   --supervised-loss bce_dice \
   --bce-pos-weight 6.0 \
@@ -264,7 +316,7 @@ python3 -m NCA.train \
 import numpy as np
 from pathlib import Path
 
-for path in sorted(Path("NCA/data").glob("*.npy"))[:5]:
+for path in sorted(Path("NCA/data_v2").glob("**/*.npy"))[:5]:
     arr = np.load(path, mmap_mode="r")
     print(path.name, arr.shape, arr.dtype, arr.min(), arr.max())
 ```
@@ -281,7 +333,7 @@ for path in sorted(Path("NCA/data").glob("*.npy"))[:5]:
 - увеличить rollout horizon;
 - проверить, нет ли слишком доброго split.
 
-5. Для честной оценки использовать независимый split, желательно по группам (`pos`), а не по соседним временным окнам.
+5. Для честной оценки использовать `split_mode="by_group"` по `pos`, а не split по соседним временным окнам.
 
 ## Локальная установка
 

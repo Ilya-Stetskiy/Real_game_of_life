@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math
+import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -44,6 +45,7 @@ class FileMetadata:
     height: int
     width: int
     channels: int
+    group_key: str
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,23 @@ def validate_data_channels(array: np.ndarray, data_channels: int, source: str = 
         )
 
 
+def extract_group_key(path: Path | str, group_regex: str | None = r"pos(\d+)", group_regex_group: int = 1) -> str:
+    """Extract a split group from a file name, falling back to the file stem."""
+    candidate = Path(path)
+    if not group_regex:
+        return candidate.stem
+
+    match = re.search(group_regex, candidate.stem)
+    if match is None:
+        return candidate.stem
+    try:
+        return str(match.group(group_regex_group))
+    except IndexError as exc:
+        raise ValueError(
+            f"group_regex_group={group_regex_group} does not exist for regex {group_regex!r}."
+        ) from exc
+
+
 def fit_normalizer_for_train_split(
     files: Sequence[Path],
     split_ratios: Sequence[float],
@@ -194,6 +213,8 @@ def fit_normalizer_for_train_split(
     seed: int = 0,
     data_channels: int = 1,
     primary_channel: int = 0,
+    group_regex: str | None = r"pos(\d+)",
+    group_regex_group: int = 1,
 ) -> VisibleChannelNormalizer:
     """Fit visible auxiliary-channel stats using train-only data."""
     normalizer = VisibleChannelNormalizer(data_channels=data_channels, primary_channel=primary_channel)
@@ -207,6 +228,17 @@ def fit_normalizer_for_train_split(
         train_count, _, _ = _split_counts(len(file_ids), split_ratios)
         train_ids = set(file_ids[:train_count].tolist())
         return normalizer.fit([path for idx, path in enumerate(files) if idx in train_ids])
+
+    if split_mode == "by_group":
+        rng = np.random.default_rng(seed)
+        groups = sorted({extract_group_key(path, group_regex, group_regex_group) for path in files})
+        shuffled_groups = np.asarray(groups, dtype=object)
+        rng.shuffle(shuffled_groups)
+        train_count, _, _ = _split_counts(len(shuffled_groups), split_ratios)
+        train_groups = {str(group) for group in shuffled_groups[:train_count]}
+        return normalizer.fit(
+            [path for path in files if extract_group_key(path, group_regex, group_regex_group) in train_groups]
+        )
 
     accum_sum = None
     accum_sq = None
@@ -265,12 +297,14 @@ class NCADataset(Dataset):
         files: Optional[Sequence[Path]] = None,
         cache_arrays: bool = True,
         data_channels: int = 1,
+        group_regex: str | None = r"pos(\d+)",
+        group_regex_group: int = 1,
     ) -> None:
         super().__init__()
         if split not in {"train", "val", "test"}:
             raise ValueError("split must be one of 'train', 'val', 'test'.")
-        if split_mode not in {"within_file", "by_file"}:
-            raise ValueError("split_mode must be 'within_file' or 'by_file'.")
+        if split_mode not in {"within_file", "by_file", "by_group"}:
+            raise ValueError("split_mode must be 'within_file', 'by_file', or 'by_group'.")
         if min_steps < 1 or max_steps < min_steps:
             raise ValueError("Expected 1 <= min_steps <= max_steps.")
         if data_channels < 1:
@@ -288,6 +322,8 @@ class NCADataset(Dataset):
         self.seed = int(seed)
         self.cache_arrays = bool(cache_arrays)
         self.data_channels = int(data_channels)
+        self.group_regex = group_regex
+        self.group_regex_group = int(group_regex_group)
 
         if files is None:
             file_paths = discover_npy_files(self.data_root, self.pattern)
@@ -332,6 +368,7 @@ class NCADataset(Dataset):
                     height=height,
                     width=width,
                     channels=channels,
+                    group_key=extract_group_key(path, self.group_regex, self.group_regex_group),
                 )
             )
         return metadata
@@ -341,7 +378,7 @@ class NCADataset(Dataset):
         return self.data_channels
 
     def train_files(self) -> List[Path]:
-        if self.split_mode == "by_file":
+        if self.split_mode in {"by_file", "by_group"}:
             selected_ids = {index.file_id for index in self.indices}
             return [meta.path for meta in self.metadata if meta.file_id in selected_ids]
         return [meta.path for meta in self.metadata]
@@ -349,6 +386,8 @@ class NCADataset(Dataset):
     def _build_indices(self) -> List[SampleIndex]:
         if self.split_mode == "within_file":
             return self._build_within_file_indices()
+        if self.split_mode == "by_group":
+            return self._build_by_group_indices()
         return self._build_by_file_indices()
 
     def _build_within_file_indices(self) -> List[SampleIndex]:
@@ -384,6 +423,31 @@ class NCADataset(Dataset):
         indices: List[SampleIndex] = []
         for meta in self.metadata:
             if meta.file_id not in split_ids[self.split]:
+                continue
+            max_start = meta.timesteps - self.max_steps - 1
+            if max_start < 0:
+                continue
+            for t0 in range(max_start + 1):
+                indices.append(SampleIndex(file_id=meta.file_id, t0=t0))
+        return indices
+
+    def _build_by_group_indices(self) -> List[SampleIndex]:
+        rng = np.random.default_rng(self.seed)
+        groups = np.asarray(sorted({meta.group_key for meta in self.metadata}), dtype=object)
+        rng.shuffle(groups)
+        train_count, val_count, test_count = _split_counts(len(groups), self.split_ratios)
+        split_groups = {
+            "train": {str(group) for group in groups[:train_count]},
+            "val": {str(group) for group in groups[train_count:train_count + val_count]},
+            "test": {
+                str(group)
+                for group in groups[train_count + val_count:train_count + val_count + test_count]
+            },
+        }
+
+        indices: List[SampleIndex] = []
+        for meta in self.metadata:
+            if meta.group_key not in split_groups[self.split]:
                 continue
             max_start = meta.timesteps - self.max_steps - 1
             if max_start < 0:
@@ -480,7 +544,7 @@ def nca_collate_fn(batch: Sequence[Dict[str, torch.Tensor | int]]) -> Dict[str, 
 def build_dataloaders(
     data_root: Path | str,
     pattern: str = "**/*.npy",
-    split_mode: str = "within_file",
+    split_mode: str = "by_group",
     split_ratios: Sequence[float] = (0.8, 0.1, 0.1),
     train_steps: Tuple[int, int] = (4, 16),
     eval_steps: Optional[Dict[str, int]] = None,
@@ -491,6 +555,8 @@ def build_dataloaders(
     cache_arrays: bool = True,
     data_channels: int = 1,
     primary_channel: int = 0,
+    group_regex: str | None = r"pos(\d+)",
+    group_regex_group: int = 1,
 ) -> Tuple[Dict[str, DataLoader], VisibleChannelNormalizer]:
     """Build train/val/test loaders for training and deterministic/stochastic eval."""
     root = Path(data_root)
@@ -502,6 +568,8 @@ def build_dataloaders(
         seed=seed,
         data_channels=data_channels,
         primary_channel=primary_channel,
+        group_regex=group_regex,
+        group_regex_group=group_regex_group,
     )
 
     eval_steps = eval_steps or {"one_step": 1, "rollout": train_steps[1], "stochastic": train_steps[1]}
@@ -522,7 +590,7 @@ def build_dataloaders(
             min_steps=eval_steps["one_step"],
             max_steps=eval_steps["one_step"],
             augment=False,
-            seed=seed + 1,
+            seed=seed,
             batch_size=eval_batch_size,
             shuffle=False,
         ),
@@ -531,7 +599,7 @@ def build_dataloaders(
             min_steps=eval_steps["rollout"],
             max_steps=eval_steps["rollout"],
             augment=False,
-            seed=seed + 2,
+            seed=seed,
             batch_size=eval_batch_size,
             shuffle=False,
         ),
@@ -540,7 +608,7 @@ def build_dataloaders(
             min_steps=eval_steps["stochastic"],
             max_steps=eval_steps["stochastic"],
             augment=False,
-            seed=seed + 3,
+            seed=seed,
             batch_size=eval_batch_size,
             shuffle=False,
         ),
@@ -563,6 +631,8 @@ def build_dataloaders(
                 files=files,
                 cache_arrays=cache_arrays,
                 data_channels=data_channels,
+                group_regex=group_regex,
+                group_regex_group=group_regex_group,
             )
         except ValueError:
             if name == "train":

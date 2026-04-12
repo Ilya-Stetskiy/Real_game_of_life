@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from NCA.dataset import NCADataset, nca_collate_fn
+from NCA.dataset import NCADataset, build_dataloaders, nca_collate_fn
 
 
 def _make_density_series(timesteps: int, height: int, width: int, offset: float) -> np.ndarray:
@@ -90,6 +90,90 @@ def test_by_file_split_has_disjoint_file_ids(tmp_path: Path) -> None:
     assert train_ids
     assert val_ids
     assert train_ids.isdisjoint(val_ids)
+
+
+def test_by_group_split_keeps_related_files_together(tmp_path: Path) -> None:
+    for pos in range(4):
+        for q in range(2):
+            array = _make_multichannel_series(12, 4, 4, offset=pos + q * 0.1, channels=1)
+            np.save(tmp_path / f"sample_pos{pos}_q{q}.npy", array)
+
+    train = NCADataset(
+        data_root=tmp_path,
+        split="train",
+        split_mode="by_group",
+        split_ratios=(0.5, 0.25, 0.25),
+        min_steps=2,
+        max_steps=3,
+        seed=11,
+    )
+    val = NCADataset(
+        data_root=tmp_path,
+        split="val",
+        split_mode="by_group",
+        split_ratios=(0.5, 0.25, 0.25),
+        min_steps=2,
+        max_steps=3,
+        seed=11,
+    )
+    test = NCADataset(
+        data_root=tmp_path,
+        split="test",
+        split_mode="by_group",
+        split_ratios=(0.5, 0.25, 0.25),
+        min_steps=2,
+        max_steps=3,
+        seed=11,
+    )
+
+    def groups(dataset: NCADataset) -> set[str]:
+        file_ids = {sample.file_id for sample in dataset.indices}
+        return {meta.group_key for meta in dataset.metadata if meta.file_id in file_ids}
+
+    train_groups = groups(train)
+    val_groups = groups(val)
+    test_groups = groups(test)
+
+    assert train_groups
+    assert val_groups
+    assert test_groups
+    assert train_groups.isdisjoint(val_groups)
+    assert train_groups.isdisjoint(test_groups)
+    assert val_groups.isdisjoint(test_groups)
+
+
+def test_build_dataloaders_by_group_uses_consistent_split_seed(tmp_path: Path) -> None:
+    for pos in range(6):
+        for q in range(2):
+            array = _make_multichannel_series(12, 4, 4, offset=pos + q * 0.1, channels=1)
+            np.save(tmp_path / f"sample_pos{pos}_q{q}.npy", array)
+
+    loaders, _ = build_dataloaders(
+        data_root=tmp_path,
+        pattern="*.npy",
+        split_mode="by_group",
+        split_ratios=(0.5, 0.25, 0.25),
+        train_steps=(2, 3),
+        eval_steps={"one_step": 1, "rollout": 2, "stochastic": 2},
+        batch_size=2,
+        seed=19,
+    )
+
+    def groups(loader_name: str) -> set[str]:
+        dataset = loaders[loader_name].dataset
+        file_ids = {sample.file_id for sample in dataset.indices}
+        return {meta.group_key for meta in dataset.metadata if meta.file_id in file_ids}
+
+    train_groups = groups("train")
+    val_groups = groups("val_rollout")
+    test_groups = groups("test_rollout")
+
+    assert train_groups
+    assert val_groups
+    assert test_groups
+    assert train_groups.isdisjoint(val_groups)
+    assert train_groups.isdisjoint(test_groups)
+    assert val_groups.isdisjoint(test_groups)
 
 
 def test_within_file_split_is_time_disjoint(tmp_path: Path) -> None:

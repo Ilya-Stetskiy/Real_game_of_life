@@ -308,7 +308,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default="NCA/data")
     parser.add_argument("--pattern", type=str, default="**/*.npy")
     parser.add_argument("--out-dir", type=str, default="NCA/runs/default")
-    parser.add_argument("--split-mode", type=str, default="within_file", choices=["within_file", "by_file"])
+    parser.add_argument("--split-mode", type=str, default="by_group", choices=["within_file", "by_file", "by_group"])
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=(0.8, 0.1, 0.1))
+    parser.add_argument("--group-regex", type=str, default=r"pos(\d+)")
+    parser.add_argument("--group-regex-group", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -350,6 +353,7 @@ def main() -> None:
         data_root=args.data_root,
         pattern=args.pattern,
         split_mode=args.split_mode,
+        split_ratios=args.split_ratios,
         train_steps=(args.min_steps, args.max_steps),
         eval_steps={"one_step": 1, "rollout": args.eval_steps, "stochastic": args.eval_steps},
         batch_size=args.batch_size,
@@ -358,6 +362,8 @@ def main() -> None:
         num_workers=args.num_workers,
         data_channels=args.data_channels,
         primary_channel=args.primary_channel,
+        group_regex=args.group_regex,
+        group_regex_group=args.group_regex_group,
     )
 
     model = NCA(
