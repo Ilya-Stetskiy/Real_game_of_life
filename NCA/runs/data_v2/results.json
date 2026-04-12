@@ -1,0 +1,249 @@
+{
+  "config": {
+    "project_root": "D:\\Proga\\Game_of_life\\Real_game_of_life",
+    "data_root": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\data_v2",
+    "run_dir": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\data_v2",
+    "train_steps": [
+      8,
+      16
+    ],
+    "eval_steps": {
+      "one_step": 1,
+      "rollout": 16,
+      "stochastic": 16
+    },
+    "batch_size": 8,
+    "epochs": 5,
+    "lr": 0.001,
+    "kernel_size": 3,
+    "model_width": 64,
+    "update_prob": 0.5,
+    "data_channels": 1,
+    "hidden_channels": 8,
+    "primary_channel": 0,
+    "loss_channels": "primary",
+    "supervised_loss": "bce_dice",
+    "bce_pos_weight": 0.25,
+    "lambda_dice": 1.5,
+    "eval_threshold": 0.3,
+    "num_rollouts": 8,
+    "loss_mode": "hybrid",
+    "lambda_intermediate": 0.5,
+    "lambda_hidden_l2": 0.001,
+    "use_alive_mask": false,
+    "seed": 0,
+    "num_workers": 0,
+    "device": null
+  },
+  "device": "cpu",
+  "data_info": {
+    "splits": {
+      "train": {
+        "files": 40,
+        "sample_file": "HeLa-S3_nuc_pos0_q0_5c.npy",
+        "shape": [
+          42,
+          64,
+          64,
+          1
+        ],
+        "dtype": "float32",
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.04797426983714104,
+        "nonzero_fraction": 0.08334495907738096
+      },
+      "val": {
+        "files": 7,
+        "sample_file": "HeLa-S3_nuc_pos14_q2_5c.npy",
+        "shape": [
+          42,
+          64,
+          64,
+          1
+        ],
+        "dtype": "float32",
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.03633053973317146,
+        "nonzero_fraction": 0.06300571986607142
+      },
+      "test": {
+        "files": 10,
+        "sample_file": "HeLa-S3_nuc_pos18_q1_5c.npy",
+        "shape": [
+          42,
+          64,
+          64,
+          1
+        ],
+        "dtype": "float32",
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.05304472893476486,
+        "nonzero_fraction": 0.09169805617559523
+      }
+    }
+  },
+  "loader_info": {
+    "train": {
+      "files": 40,
+      "samples": 1040
+    },
+    "val_one_step": {
+      "files": 7,
+      "samples": 287
+    },
+    "val_rollout": {
+      "files": 7,
+      "samples": 182
+    },
+    "test_rollout": {
+      "files": 10,
+      "samples": 260
+    }
+  },
+  "history": [
+    {
+      "epoch": 0.0,
+      "train_loss": 1.2421210669554197,
+      "train_final_loss": 0.7033502927193275,
+      "train_intermediate_loss": 1.0567424723735221,
+      "train_hidden_penalty": 10.399540786695882,
+      "val_one_step_one_step_mse": 0.06044104964368873,
+      "val_one_step_rollout_mse": 0.06044104964368873,
+      "val_one_step_population_mass_error": 5.746962765852611,
+      "val_one_step_dice": 0.48812105258305866,
+      "val_one_step_iou": 0.3247620231575436,
+      "val_one_step_precision": 0.3251933571365144,
+      "val_one_step_recall": 0.9956540978617139,
+      "val_rollout_one_step_mse": 0.060408674504445946,
+      "val_rollout_rollout_mse": 0.013447521699835424,
+      "val_rollout_population_mass_error": 0.4120565795380136,
+      "val_rollout_dice": 0.790179615435393,
+      "val_rollout_iou": 0.6633046528567439,
+      "val_rollout_precision": 0.8115741766017416,
+      "val_rollout_recall": 0.7948972556902014
+    },
+    {
+      "epoch": 1.0,
+      "train_loss": 0.9245550866310414,
+      "train_final_loss": 0.5306609509082941,
+      "train_intermediate_loss": 0.7781392235022325,
+      "train_hidden_penalty": 4.824525479169992,
+      "val_one_step_one_step_mse": 0.014512924011796713,
+      "val_one_step_rollout_mse": 0.014512924011796713,
+      "val_one_step_population_mass_error": 2.555235468679004,
+      "val_one_step_dice": 0.881054636504915,
+      "val_one_step_iou": 0.7878907753361596,
+      "val_one_step_precision": 0.796345012055503,
+      "val_one_step_recall": 0.986538259519471,
+      "val_rollout_one_step_mse": 0.014461016565885233,
+      "val_rollout_rollout_mse": 0.009673600044587383,
+      "val_rollout_population_mass_error": 0.2374865613553835,
+      "val_rollout_dice": 0.8173840486485026,
+      "val_rollout_iou": 0.696287346922833,
+      "val_rollout_precision": 0.8524869887725167,
+      "val_rollout_recall": 0.7899286435998004
+    },
+    {
+      "epoch": 2.0,
+      "train_loss": 0.8886519885980166,
+      "train_final_loss": 0.5186486507837589,
+      "train_intermediate_loss": 0.7324763132975651,
+      "train_hidden_penalty": 3.765183292902433,
+      "val_one_step_one_step_mse": 0.005252711196792209,
+      "val_one_step_rollout_mse": 0.005252711196792209,
+      "val_one_step_population_mass_error": 1.252610872189204,
+      "val_one_step_dice": 0.9171970569425159,
+      "val_one_step_iou": 0.8476676328314675,
+      "val_one_step_precision": 0.8699390027258131,
+      "val_one_step_recall": 0.9704788956377242,
+      "val_rollout_one_step_mse": 0.005211331051490877,
+      "val_rollout_rollout_mse": 0.010137702459874361,
+      "val_rollout_population_mass_error": 0.16962866809057153,
+      "val_rollout_dice": 0.8279111540835836,
+      "val_rollout_iou": 0.7113948386648427,
+      "val_rollout_precision": 0.8166749088660531,
+      "val_rollout_recall": 0.8410345056782598
+    },
+    {
+      "epoch": 3.0,
+      "train_loss": 0.87676244699038,
+      "train_final_loss": 0.5176066863995332,
+      "train_intermediate_loss": 0.7120863882394938,
+      "train_hidden_penalty": 3.1125659814247717,
+      "val_one_step_one_step_mse": 0.003125794820435759,
+      "val_one_step_rollout_mse": 0.003125794820435759,
+      "val_one_step_population_mass_error": 0.73560398320357,
+      "val_one_step_dice": 0.9254582143492169,
+      "val_one_step_iou": 0.8619023197227054,
+      "val_one_step_precision": 0.8984808607233895,
+      "val_one_step_recall": 0.9546864761246575,
+      "val_rollout_one_step_mse": 0.0030913054436931143,
+      "val_rollout_rollout_mse": 0.00982710743403953,
+      "val_rollout_population_mass_error": 0.12317300976618477,
+      "val_rollout_dice": 0.8324162804562113,
+      "val_rollout_iou": 0.7180918766104657,
+      "val_rollout_precision": 0.8322470525036687,
+      "val_rollout_recall": 0.8339119061179783
+    },
+    {
+      "epoch": 4.0,
+      "train_loss": 0.8675090473431807,
+      "train_final_loss": 0.5115770890162541,
+      "train_intermediate_loss": 0.7062407956673549,
+      "train_hidden_penalty": 2.8115636128645676,
+      "val_one_step_one_step_mse": 0.0024917813457755577,
+      "val_one_step_rollout_mse": 0.0024917813457755577,
+      "val_one_step_population_mass_error": 0.5036703257097138,
+      "val_one_step_dice": 0.9261990454461839,
+      "val_one_step_iou": 0.8632022158967124,
+      "val_one_step_precision": 0.9060021572642856,
+      "val_one_step_recall": 0.9479033913877275,
+      "val_rollout_one_step_mse": 0.002462803269736469,
+      "val_rollout_rollout_mse": 0.010761199640515058,
+      "val_rollout_population_mass_error": 0.11967642265169517,
+      "val_rollout_dice": 0.8255092916281327,
+      "val_rollout_iou": 0.7084916700487551,
+      "val_rollout_precision": 0.8270875060040018,
+      "val_rollout_recall": 0.8254000725953475
+    }
+  ],
+  "final_val_stochastic": {
+    "expected_mse": 0.024591002046414043,
+    "ensemble_mean_mse": 0.016076248058158417,
+    "pixelwise_std_mean": 0.044228873337092606,
+    "mass_std": 4.109676215959632,
+    "population_mass_error": 0.7944372866464697,
+    "dice": 0.7660441994667053,
+    "iou": 0.6400358184524204,
+    "precision": 0.7738489871439727,
+    "recall": 0.8086420738178751
+  },
+  "final_test_rollout": {
+    "one_step_mse": 0.0030171437520590243,
+    "rollout_mse": 0.012743934269317171,
+    "population_mass_error": 0.12013730180986,
+    "dice": 0.8348951682899938,
+    "iou": 0.722071546496767,
+    "precision": 0.8357494347023241,
+    "recall": 0.8358187838034197
+  },
+  "final_test_stochastic": {
+    "expected_mse": 0.02624363638460636,
+    "ensemble_mean_mse": 0.01778815889900381,
+    "pixelwise_std_mean": 0.044462699330214295,
+    "mass_std": 4.155578476009947,
+    "population_mass_error": 0.6258618127215992,
+    "dice": 0.778826193376021,
+    "iou": 0.6559718955646862,
+    "precision": 0.7852921287218729,
+    "recall": 0.8179009899948583
+  },
+  "visuals": {
+    "triptych": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\data_v2\\triptych.png",
+    "uncertainty": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\data_v2\\uncertainty.png",
+    "det_rollout_gif": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\data_v2\\det_rollout.gif"
+  }
+}

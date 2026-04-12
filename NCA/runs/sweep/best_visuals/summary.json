@@ -1,0 +1,27 @@
+{
+  "best_checkpoint": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep\\pos_weight_2\\checkpoint_latest.pt",
+  "threshold": 0.45,
+  "stochastic_eval": {
+    "expected_mse": 0.026315644952572055,
+    "ensemble_mean_mse": 0.018655880406084988,
+    "pixelwise_std_mean": 0.0440913260810905,
+    "mass_std": 4.008787439929114,
+    "population_mass_error": 0.8112131473090913,
+    "dice": 0.8012482424577078,
+    "iou": 0.6728319608502917,
+    "precision": 0.7346574382649528,
+    "recall": 0.883560930689176
+  },
+  "sample_binary_metrics": {
+    "dice": 0.7434554696083069,
+    "iou": 0.5916666388511658,
+    "precision": 0.6853281855583191,
+    "recall": 0.8123570084571838
+  },
+  "artifacts": {
+    "triptych": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep\\best_visuals\\triptych.png",
+    "thresholded": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep\\best_visuals\\triptych_thresholded.png",
+    "uncertainty": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep\\best_visuals\\uncertainty.png",
+    "rollout_gif": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep\\best_visuals\\det_rollout.gif"
+  }
+}

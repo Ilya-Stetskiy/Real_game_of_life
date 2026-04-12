@@ -1,0 +1,113 @@
+{
+  "checkpoint": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep_low\\pos_weight_0.25\\checkpoint_latest.pt",
+  "summary": [
+    {
+      "hidden_channel": 0,
+      "mean": 14.922869682312012,
+      "std": 12.04968547821045,
+      "mean_abs": 14.964683532714844,
+      "min": -2.7661988735198975,
+      "max": 48.390193939208984,
+      "corr_with_target_primary": -0.38167925221991084,
+      "corr_with_prediction_primary": -0.3717070667255059,
+      "mean_abs_step0": 0.4040498733520508,
+      "mean_abs_step_final": 14.964683532714844,
+      "mean_abs_temporal_delta": 14.560633659362793
+    },
+    {
+      "hidden_channel": 1,
+      "mean": 10.653932571411133,
+      "std": 5.631627559661865,
+      "mean_abs": 10.670891761779785,
+      "min": -4.418205261230469,
+      "max": 27.780794143676758,
+      "corr_with_target_primary": -0.1431247936551743,
+      "corr_with_prediction_primary": -0.13647451994806178,
+      "mean_abs_step0": 1.1330783367156982,
+      "mean_abs_step_final": 10.670891761779785,
+      "mean_abs_temporal_delta": 9.537813186645508
+    },
+    {
+      "hidden_channel": 2,
+      "mean": 4.842992305755615,
+      "std": 5.465144634246826,
+      "mean_abs": 5.964007377624512,
+      "min": -18.156822204589844,
+      "max": 23.85529899597168,
+      "corr_with_target_primary": 0.22586320053995934,
+      "corr_with_prediction_primary": 0.23954418052014897,
+      "mean_abs_step0": 0.3451671302318573,
+      "mean_abs_step_final": 5.964007377624512,
+      "mean_abs_temporal_delta": 5.618840217590332
+    },
+    {
+      "hidden_channel": 3,
+      "mean": -6.569657325744629,
+      "std": 5.915561199188232,
+      "mean_abs": 6.746579170227051,
+      "min": -26.519084930419922,
+      "max": 3.633073329925537,
+      "corr_with_target_primary": 0.2689320493634412,
+      "corr_with_prediction_primary": 0.26540278127116385,
+      "mean_abs_step0": 0.7042243480682373,
+      "mean_abs_step_final": 6.746579170227051,
+      "mean_abs_temporal_delta": 6.042354583740234
+    },
+    {
+      "hidden_channel": 4,
+      "mean": -6.521397113800049,
+      "std": 5.559638977050781,
+      "mean_abs": 6.806371212005615,
+      "min": -24.582809448242188,
+      "max": 5.824594020843506,
+      "corr_with_target_primary": 0.1302039013338117,
+      "corr_with_prediction_primary": 0.08371829972944665,
+      "mean_abs_step0": 0.44169944524765015,
+      "mean_abs_step_final": 6.806371212005615,
+      "mean_abs_temporal_delta": 6.36467170715332
+    },
+    {
+      "hidden_channel": 5,
+      "mean": -5.108654975891113,
+      "std": 6.318063735961914,
+      "mean_abs": 5.824305534362793,
+      "min": -27.903532028198242,
+      "max": 6.425715446472168,
+      "corr_with_target_primary": 0.31006826162821677,
+      "corr_with_prediction_primary": 0.32067924928631986,
+      "mean_abs_step0": 0.9086955785751343,
+      "mean_abs_step_final": 5.824305534362793,
+      "mean_abs_temporal_delta": 4.915609836578369
+    },
+    {
+      "hidden_channel": 6,
+      "mean": -5.798780918121338,
+      "std": 7.179837703704834,
+      "mean_abs": 7.069559574127197,
+      "min": -29.02918243408203,
+      "max": 10.434558868408203,
+      "corr_with_target_primary": 0.23882432842690882,
+      "corr_with_prediction_primary": 0.22318432437418986,
+      "mean_abs_step0": 0.3179249167442322,
+      "mean_abs_step_final": 7.069559574127197,
+      "mean_abs_temporal_delta": 6.75163459777832
+    },
+    {
+      "hidden_channel": 7,
+      "mean": 14.989160537719727,
+      "std": 11.739006996154785,
+      "mean_abs": 15.09062671661377,
+      "min": -4.932682991027832,
+      "max": 45.417320251464844,
+      "corr_with_target_primary": -0.35275813930825534,
+      "corr_with_prediction_primary": -0.32595124218308913,
+      "mean_abs_step0": 0.20526231825351715,
+      "mean_abs_step_final": 15.09062671661377,
+      "mean_abs_temporal_delta": 14.885364532470703
+    }
+  ],
+  "artifacts": {
+    "hidden_channels_montage": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep_low\\hidden_analysis\\hidden_channels_montage.png",
+    "hidden_temporal_energy": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\sweep_low\\hidden_analysis\\hidden_temporal_energy.png"
+  }
+}

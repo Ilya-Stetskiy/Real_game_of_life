@@ -1,0 +1,45 @@
+{
+  "last_epoch": {
+    "epoch": 4.0,
+    "train_loss": 0.6408152345816295,
+    "train_final_loss": 0.40956724147001905,
+    "train_intermediate_loss": 0.46164028902848564,
+    "train_hidden_penalty": 4.278465204238891,
+    "val_one_step_one_step_mse": 0.01102580364433027,
+    "val_one_step_rollout_mse": 0.01102580364433027,
+    "val_one_step_population_mass_error": 1.2574380059396066,
+    "val_one_step_dice": 0.841348534630191,
+    "val_one_step_iou": 0.7264848236114748,
+    "val_one_step_precision": 0.7363913655281067,
+    "val_one_step_recall": 0.98188316822052,
+    "val_rollout_one_step_mse": 0.009990659449249506,
+    "val_rollout_rollout_mse": 0.017727109789848327,
+    "val_rollout_population_mass_error": 0.6445871323347092,
+    "val_rollout_dice": 0.7364302217960358,
+    "val_rollout_iou": 0.5876558691263198,
+    "val_rollout_precision": 0.6097010374069214,
+    "val_rollout_recall": 0.9353677600622177,
+    "val_stochastic_expected_mse": 0.02872976949438453,
+    "val_stochastic_ensemble_mean_mse": 0.021196690713986756,
+    "val_stochastic_pixelwise_std_mean": 0.044121773540973665,
+    "val_stochastic_mass_std": 4.036094927787781,
+    "val_stochastic_population_mass_error": 1.14651260972023,
+    "val_stochastic_dice": 0.7636572659015656,
+    "val_stochastic_iou": 0.6213576287031174,
+    "val_stochastic_precision": 0.6530965149402619,
+    "val_stochastic_recall": 0.9226292461156845
+  },
+  "sample_binary_metrics": {
+    "dice": 0.6666666865348816,
+    "iou": 0.5,
+    "precision": 0.539393961429596,
+    "recall": 0.8725489974021912
+  },
+  "artifacts": {
+    "loss_curve": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\workbench\\loss_curve.png",
+    "triptych": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\workbench\\triptych.png",
+    "thresholded": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\workbench\\triptych_thresholded.png",
+    "uncertainty": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\workbench\\uncertainty.png",
+    "rollout_gif": "D:\\Proga\\Game_of_life\\Real_game_of_life\\NCA\\runs\\workbench\\det_rollout.gif"
+  }
+}
