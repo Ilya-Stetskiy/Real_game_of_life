@@ -6,6 +6,6 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 NCA/runs/
-*.pyc
+*.py
 *.tif
 *.xml
