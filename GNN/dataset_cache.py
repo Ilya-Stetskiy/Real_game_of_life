@@ -13,8 +13,8 @@ from .graph_dataset import (
     FrameGraphDatasetConfig,
     build_frame_graphs,
     cell_graph_to_pyg_training_data,
-    default_node_feature_columns,
     load_processed_spots,
+    temporal_base_feature_columns,
 )
 
 
@@ -47,12 +47,13 @@ def build_graph_cache(
         cfg = replace(cfg, source_path=Path(source_path))
 
     spot_table = load_processed_spots(cfg.source_path) if spots is None else spots
-    node_features = default_node_feature_columns(spot_table, cfg)
-    cfg = replace(cfg, node_feature_columns=node_features)
-
     cell_graphs = build_frame_graphs(spot_table, cfg)
     if max_graphs is not None:
         cell_graphs = cell_graphs[: int(max_graphs)]
+    if cfg.temporal_lags and cfg.temporal_feature_columns is None:
+        cfg = replace(cfg, temporal_feature_columns=temporal_base_feature_columns(spot_table, cfg))
+    if cfg.node_feature_columns is None and cell_graphs:
+        cfg = replace(cfg, node_feature_columns=tuple(cell_graphs[0].node_feature_columns))
     graphs = [cell_graph_to_pyg_training_data(graph, cfg) for graph in cell_graphs]
     splits = build_splits(graphs, split_config or SplitConfig())
     summary = summarize_graphs(graphs, cfg, splits)
@@ -213,6 +214,9 @@ def summarize_graphs(
         "edge_dim": int(graphs[0].edge_attr.size(-1)) if graphs else 0,
         "node_features": list(cfg.node_feature_columns or ()),
         "edge_features": list(cfg.edge_feature_columns),
+        "temporal_lags": list(cfg.temporal_lags),
+        "temporal_feature_columns": list(cfg.temporal_feature_columns or ()),
+        "include_temporal_deltas": bool(cfg.include_temporal_deltas),
         "splits": {name: len(indices) for name, indices in splits.items()},
         "target_valid_regression": _sum_graph_attr(graphs, "valid_regression_mask"),
         "target_division": _sum_graph_attr(graphs, "target_division"),
@@ -274,6 +278,15 @@ def parse_horizons(value: str) -> tuple[int, ...]:
     return horizons
 
 
+def parse_positive_ints(value: str | None) -> tuple[int, ...]:
+    if value is None or not value.strip():
+        return ()
+    values = tuple(sorted({int(part.strip()) for part in value.split(",") if part.strip()}))
+    if any(item < 1 for item in values):
+        raise ValueError("temporal lags must contain positive integers.")
+    return values
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build cached PyG frame graphs from processed HeLa spot data.")
     parser.add_argument("--source", type=Path, default=FrameGraphDatasetConfig().source_path)
@@ -282,6 +295,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--edge-k-nearest", type=int, default=FrameGraphDatasetConfig().edge_k_nearest)
     parser.add_argument("--horizons", default="3,5,10")
     parser.add_argument("--node-features", default=None, help="Comma-separated feature columns. Omit to use defaults.")
+    parser.add_argument("--temporal-lags", default="", help="Comma-separated past ancestor lags, e.g. 1,2,3,5,10.")
+    parser.add_argument(
+        "--temporal-features",
+        default=None,
+        help="Comma-separated base feature columns to copy from ancestor cells. Omit to use safe defaults.",
+    )
+    parser.add_argument("--no-temporal-deltas", action="store_true", help="Do not add current-minus-ancestor deltas.")
     parser.add_argument("--split-mode", choices=("by_position", "by_sequence", "none"), default="by_position")
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--val-fraction", type=float, default=0.15)
@@ -299,6 +319,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         edge_k_nearest=args.edge_k_nearest,
         horizons=parse_horizons(args.horizons),
         node_feature_columns=parse_feature_columns(args.node_features),
+        temporal_lags=parse_positive_ints(args.temporal_lags),
+        temporal_feature_columns=parse_feature_columns(args.temporal_features),
+        include_temporal_deltas=not args.no_temporal_deltas,
     )
     split_config = SplitConfig(
         mode=args.split_mode,

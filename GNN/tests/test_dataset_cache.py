@@ -64,6 +64,30 @@ def test_build_graph_cache_saves_loads_and_summarizes(tmp_path: Path) -> None:
     assert cache["summary"]["target_division"] == 1
 
 
+def test_build_graph_cache_includes_auto_temporal_features() -> None:
+    cfg = FrameGraphDatasetConfig(
+        node_feature_columns=None,
+        edge_radius=3.0,
+        horizons=(3, 5, 10),
+        temporal_lags=(1,),
+        temporal_feature_columns=("x", "AREA"),
+    )
+    cache = build_graph_cache(
+        spots=_sample_spots(),
+        dataset_config=cfg,
+        split_config=SplitConfig(mode="none"),
+        max_graphs=None,
+    )
+
+    summary = cache["summary"]
+    assert summary["temporal_lags"] == [1]
+    assert summary["temporal_feature_columns"] == ["x", "AREA"]
+    assert "temporal_lag1_x" in summary["node_features"]
+    assert "temporal_lag1_delta_AREA" in summary["node_features"]
+    assert summary["node_dim"] == cache["graphs"][0].x.size(-1)
+    assert cache["dataset_config"]["node_feature_columns"] == summary["node_features"]
+
+
 def test_save_load_cache_roundtrip(tmp_path: Path) -> None:
     from Real_game_of_life.GNN.graph_dataset import build_pyg_frame_graphs
     from Real_game_of_life.GNN.dataset_cache import summarize_graphs

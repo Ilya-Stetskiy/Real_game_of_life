@@ -13,6 +13,7 @@ from Real_game_of_life.GNN.train_one_step import (
     binary_classification_metrics,
     division_horizon_tensors,
     infer_division_horizons,
+    top_k_metrics,
     train_from_cache,
 )
 
@@ -31,6 +32,27 @@ def test_binary_classification_metrics_report_rare_event_counts() -> None:
     assert metrics["division_recall"] == 0.5
     assert metrics["division_f1"] == 0.5
     assert metrics["division_ap"] == binary_average_precision(scores, target)
+    assert metrics["division_top10_effective_k"] == 4.0
+    assert metrics["division_top10_hits"] == 2.0
+    assert metrics["division_top10_precision"] == 0.5
+    assert metrics["division_top10_recall"] == 1.0
+
+
+def test_top_k_metrics_report_hits_precision_and_recall() -> None:
+    scores = torch.tensor([0.95, 0.80, 0.70, 0.10, 0.05])
+    target = torch.tensor([0, 1, 0, 1, 0], dtype=torch.bool)
+
+    metrics = top_k_metrics("division_h10", scores, target, top_ks=(1, 3, 10))
+
+    assert metrics["division_h10_top1_hits"] == 0.0
+    assert metrics["division_h10_top1_precision"] == 0.0
+    assert metrics["division_h10_top1_recall"] == 0.0
+    assert metrics["division_h10_top3_hits"] == 1.0
+    assert metrics["division_h10_top3_precision"] == 1 / 3
+    assert metrics["division_h10_top3_recall"] == 0.5
+    assert metrics["division_h10_top10_effective_k"] == 5.0
+    assert metrics["division_h10_top10_hits"] == 2.0
+    assert metrics["division_h10_top10_recall"] == 1.0
 
 
 def test_train_from_cache_runs_smoke_epoch(tmp_path: Path) -> None:

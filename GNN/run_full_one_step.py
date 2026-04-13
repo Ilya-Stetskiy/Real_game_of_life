@@ -313,6 +313,12 @@ def division_horizon_metric_lines(horizons: Iterable[int], metrics: dict[str, An
                 metric_line(f"{prefix}_tp", metrics),
                 metric_line(f"{prefix}_fp", metrics),
                 metric_line(f"{prefix}_fn", metrics),
+                metric_line(f"{prefix}_top10_hits", metrics),
+                metric_line(f"{prefix}_top10_precision", metrics),
+                metric_line(f"{prefix}_top10_recall", metrics),
+                metric_line(f"{prefix}_top50_hits", metrics),
+                metric_line(f"{prefix}_top50_precision", metrics),
+                metric_line(f"{prefix}_top50_recall", metrics),
             ]
         )
     return lines

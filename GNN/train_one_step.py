@@ -18,6 +18,9 @@ from .dataset_cache import DEFAULT_CACHE_PATH, build_and_save_graph_cache, load_
 from .gnn_model import CellInteractionGNN, cell_dynamics_loss
 
 
+DEFAULT_TOP_KS = (10, 20, 50, 100)
+
+
 @dataclass(frozen=True)
 class TrainConfig:
     cache_path: Path = DEFAULT_CACHE_PATH
@@ -455,7 +458,7 @@ def binary_classification_metrics(prefix: str, score: torch.Tensor, target: torc
     predicted_positive_rate = (tp + fp) / total if total > 0 else 0.0
     average_precision = binary_average_precision(score, target)
 
-    return {
+    metrics = {
         f"{prefix}_acc": float(accuracy),
         f"{prefix}_precision": float(precision),
         f"{prefix}_recall": float(recall),
@@ -468,6 +471,8 @@ def binary_classification_metrics(prefix: str, score: torch.Tensor, target: torc
         f"{prefix}_fn": float(fn),
         f"{prefix}_tn": float(tn),
     }
+    metrics.update(top_k_metrics(prefix, score, target, DEFAULT_TOP_KS))
+    return metrics
 
 
 def binary_average_precision(score: torch.Tensor, target: torch.Tensor) -> float:
@@ -482,6 +487,35 @@ def binary_average_precision(score: torch.Tensor, target: torch.Tensor) -> float
     precision_at_rank = true_positives / ranks
     ap = (precision_at_rank * sorted_target).sum() / positives
     return float(ap.item())
+
+
+def top_k_metrics(
+    prefix: str,
+    score: torch.Tensor,
+    target: torch.Tensor,
+    top_ks: Iterable[int] = DEFAULT_TOP_KS,
+) -> dict[str, float]:
+    score = score.detach().flatten().float().cpu()
+    target = target.detach().flatten().bool().cpu()
+    total = int(target.numel())
+    positives = int(target.sum().item())
+    metrics: dict[str, float] = {}
+    if total == 0:
+        return metrics
+
+    order = torch.argsort(score, descending=True)
+    for requested_k in top_ks:
+        requested_k = int(requested_k)
+        k = min(requested_k, total)
+        if k <= 0:
+            continue
+        top_target = target[order[:k]]
+        hits = int(top_target.sum().item())
+        metrics[f"{prefix}_top{requested_k}_effective_k"] = float(k)
+        metrics[f"{prefix}_top{requested_k}_hits"] = float(hits)
+        metrics[f"{prefix}_top{requested_k}_precision"] = float(hits / k)
+        metrics[f"{prefix}_top{requested_k}_recall"] = float(hits / positives) if positives > 0 else 0.0
+    return metrics
 
 
 def make_loader(graphs: list[Any], config: TrainConfig, *, shuffle: bool) -> DataLoader:

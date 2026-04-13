@@ -10,13 +10,19 @@ import pandas as pd
 from .graph_conversion import CellGraph, GraphBuildConfig, data_to_graph
 
 
-DEFAULT_PROCESSED_SPOTS = (
-    Path(__file__).resolve().parents[1]
-    / "HeLa_Database"
-    / "HeLa клетки"
-    / "shape_division_analysis_dynamic"
-    / "spot_shape_division_dataset.parquet"
-)
+def _default_processed_spots_path() -> Path:
+    database_root = Path(__file__).resolve().parents[1] / "HeLa_Database"
+    candidates = (
+        database_root / "shape_division_analysis_dynamic" / "spot_shape_division_dataset.parquet",
+        database_root / "HeLa клетки" / "shape_division_analysis_dynamic" / "spot_shape_division_dataset.parquet",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+DEFAULT_PROCESSED_SPOTS = _default_processed_spots_path()
 
 DEFAULT_SCALAR_FEATURES = (
     "x",
@@ -46,6 +52,16 @@ DEFAULT_SCALAR_FEATURES = (
     "Fy",
 )
 DEFAULT_EDGE_FEATURES = ("dx", "dy", "distance", "unit_dx", "unit_dy")
+DEFAULT_TEMPORAL_FEATURES = (
+    "x",
+    "y",
+    "AREA",
+    "SOLIDITY",
+    "shape_mean_radius",
+    "shape_radius_cv",
+    "n_neighbors",
+    "density",
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,9 @@ class FrameGraphDatasetConfig:
     node_feature_columns: Optional[tuple[str, ...]] = None
     extra_node_feature_columns: tuple[str, ...] = ()
     edge_feature_columns: tuple[str, ...] = DEFAULT_EDGE_FEATURES
+    temporal_lags: tuple[int, ...] = ()
+    temporal_feature_columns: Optional[tuple[str, ...]] = None
+    include_temporal_deltas: bool = True
     min_nodes_per_graph: int = 1
     nan_fill_value: float = 0.0
 
@@ -96,7 +115,29 @@ def default_node_feature_columns(
     if cfg.include_shape_radii:
         columns.extend(sorted(column for column in spots.columns if column.startswith(cfg.shape_feature_prefix)))
     columns.extend(column for column in cfg.extra_node_feature_columns if column in spots.columns and column not in columns)
+    columns.extend(column for column in temporal_feature_columns(spots, cfg) if column in spots.columns and column not in columns)
     return tuple(columns)
+
+
+def temporal_feature_columns(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig | None = None) -> tuple[str, ...]:
+    cfg = cfg or FrameGraphDatasetConfig()
+    columns: list[str] = []
+    for lag in cfg.temporal_lags:
+        prefix = f"temporal_lag{int(lag)}"
+        columns.append(f"{prefix}_has_ancestor")
+        columns.append(f"{prefix}_frame_gap")
+        base_columns = temporal_base_feature_columns(spots, cfg)
+        for column in base_columns:
+            columns.append(f"{prefix}_{column}")
+            if cfg.include_temporal_deltas:
+                columns.append(f"{prefix}_delta_{column}")
+    return tuple(columns)
+
+
+def temporal_base_feature_columns(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig | None = None) -> tuple[str, ...]:
+    cfg = cfg or FrameGraphDatasetConfig()
+    candidates = cfg.temporal_feature_columns or DEFAULT_TEMPORAL_FEATURES
+    return tuple(column for column in candidates if column in spots.columns)
 
 
 def default_shape_target_columns(
@@ -243,6 +284,7 @@ def build_frame_graphs(
 
     cfg = cfg or FrameGraphDatasetConfig()
     prepared = add_one_step_targets(spots, cfg) if add_targets else spots.copy().reset_index(drop=True)
+    prepared = add_temporal_features(prepared, cfg)
     node_features = default_node_feature_columns(prepared, cfg)
 
     graphs: list[CellGraph] = []
@@ -277,6 +319,87 @@ def build_pyg_frame_graphs(
     """Build PyG Data objects per sequence/frame."""
 
     return [cell_graph_to_pyg_training_data(graph, cfg) for graph in build_frame_graphs(spots, cfg, add_targets=add_targets)]
+
+
+def add_temporal_features(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig | None = None) -> pd.DataFrame:
+    """Attach past-trajectory features by following TrackMate parent links.
+
+    The features use only ancestor spots from earlier frames. If a spot has no
+    known ancestor at a requested lag, the lag values are left as NaN and later
+    filled by the graph converter's nan_fill_value.
+    """
+
+    cfg = cfg or FrameGraphDatasetConfig()
+    lags = tuple(sorted({int(lag) for lag in cfg.temporal_lags if int(lag) > 0}))
+    if not lags:
+        return spots
+
+    required = [cfg.sequence_col, cfg.frame_col, cfg.node_id_col]
+    missing = [column for column in required if column not in spots.columns]
+    if missing:
+        raise ValueError(f"Cannot build temporal features, missing columns: {missing}")
+
+    base_columns = temporal_base_feature_columns(spots, cfg)
+    out = spots.copy().reset_index(drop=True)
+    out[cfg.node_id_col] = pd.to_numeric(out[cfg.node_id_col], errors="raise").astype(np.int64)
+    out[cfg.frame_col] = pd.to_numeric(out[cfg.frame_col], errors="raise").astype(np.int64)
+
+    row_by_key = {
+        (row[cfg.sequence_col], int(row[cfg.node_id_col])): int(index)
+        for index, row in out[[cfg.sequence_col, cfg.node_id_col]].iterrows()
+    }
+    parent_by_key = infer_parent_links(out, cfg)
+
+    ancestor_for_lag: dict[int, list[int | None]] = {lag: [] for lag in lags}
+    for _, row in out[[cfg.sequence_col, cfg.node_id_col]].iterrows():
+        sequence = row[cfg.sequence_col]
+        current_key = (sequence, int(row[cfg.node_id_col]))
+        current_ancestor = current_key
+        for lag in range(1, max(lags) + 1):
+            current_ancestor = parent_by_key.get(current_ancestor)
+            if lag in ancestor_for_lag:
+                ancestor_for_lag[lag].append(row_by_key.get(current_ancestor) if current_ancestor is not None else None)
+
+    for lag in lags:
+        prefix = f"temporal_lag{lag}"
+        ancestor_indices = ancestor_for_lag[lag]
+        has_ancestor = np.asarray([index is not None for index in ancestor_indices], dtype=bool)
+        out[f"{prefix}_has_ancestor"] = has_ancestor
+        out[f"{prefix}_frame_gap"] = np.nan
+        for column in base_columns:
+            out[f"{prefix}_{column}"] = np.nan
+            if cfg.include_temporal_deltas:
+                out[f"{prefix}_delta_{column}"] = np.nan
+
+        valid_rows = np.flatnonzero(has_ancestor)
+        if len(valid_rows) == 0:
+            continue
+        ancestor_rows = np.asarray([ancestor_indices[index] for index in valid_rows], dtype=np.int64)
+        out.loc[valid_rows, f"{prefix}_frame_gap"] = (
+            out.loc[valid_rows, cfg.frame_col].to_numpy(dtype=float)
+            - out.loc[ancestor_rows, cfg.frame_col].to_numpy(dtype=float)
+        )
+        for column in base_columns:
+            current_values = pd.to_numeric(out.loc[valid_rows, column], errors="coerce").to_numpy(dtype=float)
+            ancestor_values = pd.to_numeric(out.loc[ancestor_rows, column], errors="coerce").to_numpy(dtype=float)
+            out.loc[valid_rows, f"{prefix}_{column}"] = ancestor_values
+            if cfg.include_temporal_deltas:
+                out.loc[valid_rows, f"{prefix}_delta_{column}"] = current_values - ancestor_values
+    return out
+
+
+def infer_parent_links(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig) -> dict[tuple[object, int], tuple[object, int]]:
+    parent_by_key: dict[tuple[object, int], tuple[object, int]] = {}
+    if "next_ids" not in spots.columns and "next_id" not in spots.columns:
+        return parent_by_key
+
+    for _, row in spots.iterrows():
+        sequence = row[cfg.sequence_col]
+        parent_key = (sequence, int(row[cfg.node_id_col]))
+        for child_id in _next_child_ids(row):
+            child_key = (sequence, int(child_id))
+            parent_by_key.setdefault(child_key, parent_key)
+    return parent_by_key
 
 
 def cell_graph_to_pyg_training_data(graph: CellGraph, cfg: FrameGraphDatasetConfig | None = None):

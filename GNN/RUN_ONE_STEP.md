@@ -33,6 +33,34 @@ bash Real_game_of_life/GNN/scripts/run_one_step_server.sh \
   --num-workers 8
 ```
 
+## Temporal cache
+
+The cache builder can add ancestor-history features before training. These
+features follow TrackMate parent links only into earlier frames, so they do not
+leak future target labels into the node features.
+
+```bash
+python -m Real_game_of_life.GNN.dataset_cache \
+  --source Real_game_of_life/HeLa_Database/shape_division_analysis_dynamic/spot_shape_division_dataset.parquet \
+  --out Real_game_of_life/GNN/cache/frame_graphs_temporal.pt \
+  --edge-radius 40 \
+  --split-mode by_position \
+  --seed 17 \
+  --temporal-lags 1,2,3,5,10 \
+  --temporal-features x,y,AREA,SOLIDITY,shape_mean_radius,shape_radius_cv,n_neighbors,density
+```
+
+Train on that cache by overriding `CACHE`:
+
+```bash
+PYTHON=python \
+DEVICE=cuda \
+PRESET=server \
+CACHE=Real_game_of_life/GNN/cache/frame_graphs_temporal.pt \
+OUT_DIR=Real_game_of_life/GNN/runs/horizon_temporal_server \
+bash Real_game_of_life/GNN/scripts/run_one_step_server.sh
+```
+
 ## Local smoke run
 
 ```bash

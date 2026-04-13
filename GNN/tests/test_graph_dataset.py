@@ -10,6 +10,7 @@ import torch
 from Real_game_of_life.GNN.graph_dataset import (
     FrameGraphDatasetConfig,
     add_one_step_targets,
+    add_temporal_features,
     build_frame_graphs,
     cell_graph_to_pyg_training_data,
     default_node_feature_columns,
@@ -75,6 +76,55 @@ def test_add_one_step_targets_masks_split_and_last_frame_nodes() -> None:
     assert bool(by_id.at[3, "target_death"]) is False
 
 
+def test_add_temporal_features_follow_single_and_split_parent_links() -> None:
+    cfg = FrameGraphDatasetConfig(
+        edge_radius=3.0,
+        horizons=(3, 5, 10),
+        temporal_lags=(1,),
+        temporal_feature_columns=("x", "AREA"),
+    )
+    prepared = add_one_step_targets(_sample_spots(), cfg)
+    temporal = add_temporal_features(prepared, cfg).set_index("spot_id")
+
+    assert bool(temporal.at[1, "temporal_lag1_has_ancestor"]) is False
+    assert bool(temporal.at[3, "temporal_lag1_has_ancestor"]) is True
+    assert temporal.at[3, "temporal_lag1_frame_gap"] == 1.0
+    assert temporal.at[3, "temporal_lag1_x"] == 0.0
+    assert temporal.at[3, "temporal_lag1_delta_x"] == 1.0
+    assert temporal.at[3, "temporal_lag1_AREA"] == 100.0
+    assert temporal.at[3, "temporal_lag1_delta_AREA"] == 5.0
+
+    assert bool(temporal.at[4, "temporal_lag1_has_ancestor"]) is True
+    assert temporal.at[4, "temporal_lag1_x"] == 10.0
+    assert temporal.at[4, "temporal_lag1_delta_x"] == -1.0
+    assert bool(temporal.at[5, "temporal_lag1_has_ancestor"]) is True
+    assert temporal.at[5, "temporal_lag1_delta_x"] == 1.0
+
+
+def test_temporal_features_enter_auto_node_feature_set_without_targets() -> None:
+    cfg = FrameGraphDatasetConfig(
+        node_feature_columns=None,
+        edge_radius=3.0,
+        horizons=(3, 5, 10),
+        temporal_lags=(1,),
+        temporal_feature_columns=("x", "AREA"),
+    )
+    graphs = build_frame_graphs(_sample_spots(), cfg)
+    feature_names = graphs[0].node_feature_columns
+
+    assert "temporal_lag1_has_ancestor" in feature_names
+    assert "temporal_lag1_x" in feature_names
+    assert "temporal_lag1_delta_x" in feature_names
+    assert "temporal_lag1_AREA" in feature_names
+    assert "temporal_lag1_delta_AREA" in feature_names
+
+    second = cell_graph_to_pyg_training_data(graphs[1], cfg)
+    x_index = feature_names.index("temporal_lag1_x")
+    delta_x_index = feature_names.index("temporal_lag1_delta_x")
+    assert second.x[:, x_index].tolist()[:3] == [0.0, 10.0, 10.0]
+    assert second.x[:, delta_x_index].tolist()[:3] == [1.0, -1.0, 1.0]
+
+
 def test_build_frame_graphs_creates_one_graph_per_frame_without_cross_frame_edges() -> None:
     graphs = build_frame_graphs(_sample_spots(), _cfg())
 
@@ -127,7 +177,11 @@ def test_default_node_features_do_not_include_future_leakage_columns() -> None:
 
 
 def test_real_processed_spots_smoke_builds_pyg_graph() -> None:
-    path = Path(r"D:/Proga/Game_of_life/Real_game_of_life/HeLa_Database/HeLa клетки/shape_division_analysis_dynamic/spot_shape_division_dataset.parquet")
+    candidates = (
+        Path(r"D:/Proga/Game_of_life/Real_game_of_life/HeLa_Database/shape_division_analysis_dynamic/spot_shape_division_dataset.parquet"),
+        Path(r"D:/Proga/Game_of_life/Real_game_of_life/HeLa_Database/HeLa клетки/shape_division_analysis_dynamic/spot_shape_division_dataset.parquet"),
+    )
+    path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     if not path.exists():
         pytest.skip("processed HeLa parquet is not available")
 
