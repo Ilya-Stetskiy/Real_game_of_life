@@ -293,23 +293,23 @@ Dataset сильно несбалансирован для предсказан�
 
 ### Ограничения
 
-- The dataset has very few positive division examples in the test split.
-- Division metrics can vary strongly with split strategy.
-- The current GNN is supervised one-step learning, not a fully autoregressive simulator yet.
-- Temporal features depend on TrackMate parent links; missing or noisy links reduce their value.
-- Large raw microscopy files, XML and graph caches are not suitable for normal Git commits.
-- The project currently focuses on reproducible experimentation rather than a packaged library API.
+- В test split очень мало положительных примеров деления.
+- Метрики деления могут сильно зависеть от стратегии split.
+- Текущая GNN - это supervised one-step модель, а не полноценный autoregressive simulator.
+- Temporal-признаки зависят от parent-ссылок TrackMate; пропущенные или шумные связи снижают их ценность.
+- Крупные raw microscopy файлы, XML и graph cache файлы не подходят для обычных Git-коммитов.
+- Проект сейчас больше ориентирован на воспроизводимые эксперименты, чем на packaged library API.
 
 ### Дальнейшая работа
 
-- Improve split strategy for rare biological events.
-- Add event-focused sampling or loss weighting for division horizons.
-- Compare temporal GNN training against the temporal tabular baseline.
-- Add calibration and threshold selection for event heads.
-- Implement multi-step rollout evaluation.
-- Explore graph construction alternatives: adaptive radius, kNN, density-aware edges.
-- Add richer shape encoders instead of using only hand-crafted radial features.
-- Produce visual diagnostics for predicted division risk over time.
+- Улучшить split strategy для редких биологических событий.
+- Добавить event-focused sampling или loss weighting для division horizons.
+- Сравнить temporal GNN training с temporal tabular baseline.
+- Добавить calibration и threshold selection для event heads.
+- Реализовать multi-step rollout evaluation.
+- Проверить альтернативы построения графа: adaptive radius, kNN, density-aware edges.
+- Добавить более богатые shape encoders вместо одних hand-crafted radial features.
+- Сделать визуальную диагностику predicted division risk во времени.
 
 ---
 
