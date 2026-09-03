@@ -20,3 +20,4 @@ NCA/runs/
 GNN/cache/*.pt
 GNN/cache/*.pt.summary.json
 GNN/runs/
+HeLa_Database/division_prediction_model/

@@ -76,6 +76,14 @@ def test_add_one_step_targets_masks_split_and_last_frame_nodes() -> None:
     assert bool(by_id.at[3, "target_death"]) is False
 
 
+def test_add_one_step_targets_rejects_duplicate_spot_ids_within_sequence() -> None:
+    spots = _sample_spots()
+    spots.loc[1, "spot_id"] = spots.loc[0, "spot_id"]
+
+    with pytest.raises(ValueError, match="unique within"):
+        add_one_step_targets(spots, _cfg())
+
+
 def test_add_temporal_features_follow_single_and_split_parent_links() -> None:
     cfg = FrameGraphDatasetConfig(
         edge_radius=3.0,
@@ -125,6 +133,20 @@ def test_temporal_features_enter_auto_node_feature_set_without_targets() -> None
     assert second.x[:, delta_x_index].tolist()[:3] == [1.0, -1.0, 1.0]
 
 
+def test_feature_guard_rejects_target_and_linkage_columns() -> None:
+    spots = _sample_spots()
+    with pytest.raises(ValueError, match="leak"):
+        default_node_feature_columns(
+            spots,
+            FrameGraphDatasetConfig(node_feature_columns=("x", "target_division")),
+        )
+    with pytest.raises(ValueError, match="leak"):
+        add_temporal_features(
+            spots,
+            FrameGraphDatasetConfig(temporal_lags=(1,), temporal_feature_columns=("x", "n_next")),
+        )
+
+
 def test_build_frame_graphs_creates_one_graph_per_frame_without_cross_frame_edges() -> None:
     graphs = build_frame_graphs(_sample_spots(), _cfg())
 
@@ -154,6 +176,8 @@ def test_pyg_training_data_contains_one_step_and_horizon_targets() -> None:
 
     assert data.sequence_uid == "seq_a"
     assert data.frame == 0
+    assert tuple(data.pos_xy.shape) == (2, 2)
+    assert data.pos_xy.tolist() == [[0.0, 0.0], [10.0, 0.0]]
     assert tuple(data.target_delta_pos.shape) == (2, 2)
     assert tuple(data.target_delta_shape.shape) == (2, 2)
     assert data.valid_regression_mask.tolist() == [True, False]

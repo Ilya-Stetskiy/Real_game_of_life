@@ -18,18 +18,20 @@ from .graph_dataset import (
 )
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "cache" / "frame_graphs_dynamic.pt"
-SplitMode = Literal["by_position", "by_sequence", "none"]
+SplitMode = Literal["by_position", "by_position_event_balanced", "by_sequence", "none"]
 
 
 @dataclass(frozen=True)
 class SplitConfig:
-    mode: SplitMode = "by_position"
+    mode: SplitMode = "by_position_event_balanced"
     train_fraction: float = 0.70
     val_fraction: float = 0.15
     test_fraction: float = 0.15
     seed: int = 17
+    balance_target_attr: str = "target_division_within_10"
+    balance_mask_attr: str = "valid_division_within_10"
 
 
 def build_graph_cache(
@@ -133,17 +135,97 @@ def build_splits(graphs: Sequence[Any], split_config: SplitConfig | None = None)
     if group_keys:
         group_keys = list(rng.permutation(group_keys))
 
-    train_groups, val_groups, test_groups = split_group_keys(
-        group_keys,
-        train_fraction=cfg.train_fraction,
-        val_fraction=cfg.val_fraction,
-        test_fraction=cfg.test_fraction,
-    )
+    if cfg.mode == "by_position_event_balanced":
+        train_groups, val_groups, test_groups = split_group_keys_event_balanced(
+            group_keys,
+            indices_by_group=indices_by_group,
+            graphs=graphs,
+            split_config=cfg,
+        )
+    else:
+        train_groups, val_groups, test_groups = split_group_keys(
+            group_keys,
+            train_fraction=cfg.train_fraction,
+            val_fraction=cfg.val_fraction,
+            test_fraction=cfg.test_fraction,
+        )
     return {
         "train": _indices_for_groups(indices_by_group, train_groups),
         "val": _indices_for_groups(indices_by_group, val_groups),
         "test": _indices_for_groups(indices_by_group, test_groups),
     }
+
+
+def split_group_keys_event_balanced(
+    group_keys: Sequence[str],
+    *,
+    indices_by_group: dict[str, list[int]],
+    graphs: Sequence[Any],
+    split_config: SplitConfig,
+) -> tuple[list[str], list[str], list[str]]:
+    base_train, base_val, base_test = split_group_keys(
+        group_keys,
+        train_fraction=split_config.train_fraction,
+        val_fraction=split_config.val_fraction,
+        test_fraction=split_config.test_fraction,
+    )
+    capacities = {"train": len(base_train), "val": len(base_val), "test": len(base_test)}
+    if capacities["val"] == 0 or capacities["test"] == 0:
+        return base_train, base_val, base_test
+
+    group_stats = []
+    for order, group in enumerate(group_keys):
+        positives, valid = group_target_count(
+            graphs,
+            indices_by_group[group],
+            split_config.balance_target_attr,
+            split_config.balance_mask_attr,
+        )
+        group_stats.append((group, positives, valid, order))
+
+    if sum(item[1] for item in group_stats) == 0:
+        return base_train, base_val, base_test
+
+    total_fraction = split_config.train_fraction + split_config.val_fraction + split_config.test_fraction
+    target_positive = {
+        "train": sum(item[1] for item in group_stats) * split_config.train_fraction / total_fraction,
+        "val": sum(item[1] for item in group_stats) * split_config.val_fraction / total_fraction,
+        "test": sum(item[1] for item in group_stats) * split_config.test_fraction / total_fraction,
+    }
+    split_groups: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+    split_positive = {"train": 0.0, "val": 0.0, "test": 0.0}
+    ordered = sorted(group_stats, key=lambda item: (-item[1], -item[2], item[3]))
+
+    for group, positives, _valid, _order in ordered:
+        candidates = [name for name, capacity in capacities.items() if len(split_groups[name]) < capacity]
+        if not candidates:
+            candidates = ["train", "val", "test"]
+        best = min(
+            candidates,
+            key=lambda name: (
+                abs((split_positive[name] + positives) - target_positive[name]) / max(target_positive[name], 1.0),
+                len(split_groups[name]) / max(capacities[name], 1),
+                name,
+            ),
+        )
+        split_groups[best].append(group)
+        split_positive[best] += positives
+
+    return split_groups["train"], split_groups["val"], split_groups["test"]
+
+
+def group_target_count(graphs: Sequence[Any], indices: Sequence[int], target_attr: str, mask_attr: str) -> tuple[int, int]:
+    positives = 0
+    valid = 0
+    for index in indices:
+        graph = graphs[index]
+        if not hasattr(graph, target_attr) or not hasattr(graph, mask_attr):
+            continue
+        target = getattr(graph, target_attr)
+        mask = getattr(graph, mask_attr).bool()
+        positives += int(target[mask].sum().item())
+        valid += int(mask.sum().item())
+    return positives, valid
 
 
 def split_group_keys(
@@ -218,6 +300,7 @@ def summarize_graphs(
         "temporal_feature_columns": list(cfg.temporal_feature_columns or ()),
         "include_temporal_deltas": bool(cfg.include_temporal_deltas),
         "splits": {name: len(indices) for name, indices in splits.items()},
+        "split_target_counts": summarize_split_target_counts(graphs, splits, cfg),
         "target_valid_regression": _sum_graph_attr(graphs, "valid_regression_mask"),
         "target_division": _sum_graph_attr(graphs, "target_division"),
         "target_death": _sum_graph_attr(graphs, "target_death"),
@@ -226,6 +309,28 @@ def summarize_graphs(
         summary[f"target_division_within_{horizon}"] = _sum_graph_attr(graphs, f"target_division_within_{horizon}")
         summary[f"valid_division_within_{horizon}"] = _sum_graph_attr(graphs, f"valid_division_within_{horizon}")
     return summary
+
+
+def summarize_split_target_counts(
+    graphs: Sequence[Any],
+    splits: dict[str, list[int]],
+    cfg: FrameGraphDatasetConfig,
+) -> dict[str, dict[str, dict[str, int]]]:
+    targets = [("division", "target_division", "valid_event_mask"), ("disappearance", "target_death", "valid_event_mask")]
+    for horizon in cfg.horizons:
+        targets.append((
+            f"division_h{int(horizon)}",
+            f"target_division_within_{horizon}",
+            f"valid_division_within_{horizon}",
+        ))
+    result: dict[str, dict[str, dict[str, int]]] = {}
+    for split_name, indices in splits.items():
+        split_result: dict[str, dict[str, int]] = {}
+        for label, target_attr, mask_attr in targets:
+            positives, valid = group_target_count(graphs, indices, target_attr, mask_attr)
+            split_result[label] = {"valid": valid, "positives": positives}
+        result[split_name] = split_result
+    return result
 
 
 def _indices_for_groups(indices_by_group: dict[str, list[int]], groups: Sequence[str]) -> list[int]:
@@ -302,10 +407,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Comma-separated base feature columns to copy from ancestor cells. Omit to use safe defaults.",
     )
     parser.add_argument("--no-temporal-deltas", action="store_true", help="Do not add current-minus-ancestor deltas.")
-    parser.add_argument("--split-mode", choices=("by_position", "by_sequence", "none"), default="by_position")
+    parser.add_argument("--split-mode", choices=("by_position", "by_position_event_balanced", "by_sequence", "none"), default=SplitConfig().mode)
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument("--test-fraction", type=float, default=0.15)
+    parser.add_argument("--balance-target-attr", default=SplitConfig().balance_target_attr)
+    parser.add_argument("--balance-mask-attr", default=SplitConfig().balance_mask_attr)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--max-graphs", type=int, default=None, help="Optional smoke-test limit.")
     return parser.parse_args(argv)
@@ -329,6 +436,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
         seed=args.seed,
+        balance_target_attr=args.balance_target_attr,
+        balance_mask_attr=args.balance_mask_attr,
     )
     cache = build_and_save_graph_cache(
         args.out,

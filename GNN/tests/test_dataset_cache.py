@@ -88,6 +88,43 @@ def test_build_graph_cache_includes_auto_temporal_features() -> None:
     assert cache["dataset_config"]["node_feature_columns"] == summary["node_features"]
 
 
+def test_event_balanced_split_spreads_positive_groups() -> None:
+    class Graph:
+        def __init__(self, sequence_uid: str, positive: int) -> None:
+            self.sequence_uid = sequence_uid
+            self.target_division_within_10 = torch.tensor([positive], dtype=torch.float32)
+            self.valid_division_within_10 = torch.tensor([True])
+
+    graphs = [
+        Graph("seq_pos0", 1),
+        Graph("seq_pos1", 1),
+        Graph("seq_pos2", 1),
+        Graph("seq_pos3", 0),
+        Graph("seq_pos4", 0),
+        Graph("seq_pos5", 0),
+    ]
+
+    splits = build_splits(
+        graphs,
+        SplitConfig(
+            mode="by_position_event_balanced",
+            train_fraction=0.5,
+            val_fraction=0.25,
+            test_fraction=0.25,
+            seed=1,
+        ),
+    )
+
+    assert all(splits[name] for name in ("train", "val", "test"))
+    positives = {
+        name: sum(int(graphs[index].target_division_within_10.item()) for index in indices)
+        for name, indices in splits.items()
+    }
+    assert positives["train"] >= 1
+    assert positives["val"] >= 1
+    assert positives["test"] >= 1
+
+
 def test_save_load_cache_roundtrip(tmp_path: Path) -> None:
     from Real_game_of_life.GNN.graph_dataset import build_pyg_frame_graphs
     from Real_game_of_life.GNN.dataset_cache import summarize_graphs

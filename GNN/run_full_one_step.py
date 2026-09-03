@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 import torch
 
-from .dataset_cache import DEFAULT_CACHE_PATH, SplitConfig, build_and_save_graph_cache, load_graph_cache
+from .dataset_cache import DEFAULT_CACHE_PATH, SplitConfig, build_and_save_graph_cache, load_graph_cache, parse_feature_columns, parse_positive_ints
 from .graph_dataset import DEFAULT_PROCESSED_SPOTS, FrameGraphDatasetConfig
 from .train_one_step import TrainConfig, jsonable, train_from_cache
 
@@ -105,8 +105,11 @@ def run_full_training(
     build_cache_if_missing: bool = True,
     max_graphs: int | None = None,
     edge_radius: float = 40.0,
-    split_mode: str = "by_position",
+    split_mode: str = SplitConfig().mode,
     seed: int = 17,
+    temporal_lags: tuple[int, ...] = (),
+    temporal_feature_columns: tuple[str, ...] | None = None,
+    include_temporal_deltas: bool = True,
     train_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if preset not in PRESET_OVERRIDES:
@@ -121,9 +124,17 @@ def run_full_training(
 
     cache_exists = cache_path.exists()
     if rebuild_cache or (build_cache_if_missing and not cache_exists):
+        if looks_like_temporal_cache(cache_path) and not temporal_lags:
+            raise ValueError(
+                "Refusing to auto-build a temporal-looking cache without --temporal-lags. "
+                "Build the cache explicitly or pass temporal cache settings to run_full_one_step."
+            )
         dataset_config = FrameGraphDatasetConfig(
             source_path=Path(source_path) if source_path is not None else DEFAULT_PROCESSED_SPOTS,
             edge_radius=edge_radius,
+            temporal_lags=temporal_lags,
+            temporal_feature_columns=temporal_feature_columns,
+            include_temporal_deltas=include_temporal_deltas,
         )
         split_config = SplitConfig(mode=split_mode, seed=seed)  # type: ignore[arg-type]
         cache = build_and_save_graph_cache(
@@ -163,6 +174,9 @@ def run_full_training(
         "edge_radius": edge_radius,
         "split_mode": split_mode,
         "seed": seed,
+        "temporal_lags": list(temporal_lags),
+        "temporal_feature_columns": list(temporal_feature_columns or ()),
+        "include_temporal_deltas": include_temporal_deltas,
         "train_config": jsonable(asdict(train_config)),
     }
     write_json(out_dir / "effective_config.json", effective_config)
@@ -182,6 +196,10 @@ def run_full_training(
     write_json(out_dir / "full_run_summary.json", full_summary)
     write_final_report(out_dir / "final_report.md", full_summary)
     return full_summary
+
+
+def looks_like_temporal_cache(path: Path) -> bool:
+    return "temporal" in path.name.lower()
 
 
 def make_train_config(
@@ -273,13 +291,13 @@ def write_final_report(path: Path, summary: dict[str, Any]) -> None:
         metric_line("division_fp", test),
         metric_line("division_fn", test),
         *division_horizon_metric_lines(train.get("division_horizons") or (), test),
-        metric_line("death_precision", test),
-        metric_line("death_recall", test),
-        metric_line("death_f1", test),
-        metric_line("death_ap", test),
-        metric_line("death_tp", test),
-        metric_line("death_fp", test),
-        metric_line("death_fn", test),
+        metric_line("disappearance_precision", test),
+        metric_line("disappearance_recall", test),
+        metric_line("disappearance_f1", test),
+        metric_line("disappearance_ap", test),
+        metric_line("disappearance_tp", test),
+        metric_line("disappearance_fp", test),
+        metric_line("disappearance_fn", test),
         "",
         "## Artifacts",
         "",
@@ -290,7 +308,7 @@ def write_final_report(path: Path, summary: dict[str, Any]) -> None:
         "- `full_run_summary.json` - full-cycle summary with environment and cache info",
         "- `environment.json` - Python, PyTorch, CUDA and PyG versions",
         "",
-        "Note: one-step division is a rare-event target. Use precision, recall and AP before accuracy.",
+        "Note: one-step division is a rare-event target. `disappearance_*` metrics use the track-disappearance target previously reported as `death_*`.",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -362,8 +380,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-build-cache-if-missing", dest="build_cache_if_missing", action="store_false")
     parser.add_argument("--max-graphs", type=int, default=None)
     parser.add_argument("--edge-radius", type=float, default=40.0)
-    parser.add_argument("--split-mode", choices=["by_position", "by_sequence", "none"], default="by_position")
+    parser.add_argument("--split-mode", choices=["by_position", "by_position_event_balanced", "by_sequence", "none"], default=SplitConfig().mode)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--temporal-lags", default="", help="Comma-separated past ancestor lags for auto-built caches.")
+    parser.add_argument("--temporal-features", default=None, help="Comma-separated ancestor feature columns for auto-built caches.")
+    parser.add_argument("--no-temporal-deltas", action="store_true", help="Do not add current-minus-ancestor deltas.")
 
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -389,6 +410,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-delta", type=float, default=None)
     parser.add_argument("--checkpoint-every", type=int, default=None)
     parser.add_argument("--resume-from", type=Path, default=None)
+    parser.add_argument("--no-normalize-node-features", dest="normalize_node_features", action="store_false", default=None)
+    parser.add_argument("--normalization-epsilon", type=float, default=None)
     amp_group = parser.add_mutually_exclusive_group()
     amp_group.add_argument("--amp", dest="amp", action="store_true", default=None)
     amp_group.add_argument("--no-amp", dest="amp", action="store_false")
@@ -422,6 +445,8 @@ def train_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_every": args.checkpoint_every,
         "resume_from": args.resume_from,
         "amp": args.amp,
+        "normalize_node_features": args.normalize_node_features,
+        "normalization_epsilon": args.normalization_epsilon,
     }
 
 
@@ -438,6 +463,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         edge_radius=args.edge_radius,
         split_mode=args.split_mode,
         seed=args.seed,
+        temporal_lags=parse_positive_ints(args.temporal_lags),
+        temporal_feature_columns=parse_feature_columns(args.temporal_features),
+        include_temporal_deltas=not args.no_temporal_deltas,
         train_overrides=train_overrides_from_args(args),
     )
     print(json.dumps(jsonable(summary["training_summary"]), ensure_ascii=False, indent=2))

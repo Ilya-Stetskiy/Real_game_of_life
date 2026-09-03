@@ -63,6 +63,22 @@ DEFAULT_TEMPORAL_FEATURES = (
     "density",
 )
 
+UNSAFE_NODE_FEATURE_COLUMNS = {
+    "n_next",
+    "n_prev",
+    "next_id",
+    "prev_id",
+    "next_ids",
+    "prev_ids",
+    "target_child_count",
+    "target_child_ids",
+}
+UNSAFE_NODE_FEATURE_PREFIXES = (
+    "target_",
+    "division_within_",
+    "eligible_within_",
+)
+
 
 @dataclass(frozen=True)
 class FrameGraphDatasetConfig:
@@ -106,6 +122,7 @@ def default_node_feature_columns(
 
     cfg = cfg or FrameGraphDatasetConfig()
     if cfg.node_feature_columns is not None:
+        validate_safe_feature_columns(cfg.node_feature_columns, context="node_feature_columns")
         missing = [column for column in cfg.node_feature_columns if column not in spots.columns]
         if missing:
             raise ValueError(f"node_feature_columns missing from spots: {missing}")
@@ -114,6 +131,7 @@ def default_node_feature_columns(
     columns: list[str] = [column for column in DEFAULT_SCALAR_FEATURES if column in spots.columns]
     if cfg.include_shape_radii:
         columns.extend(sorted(column for column in spots.columns if column.startswith(cfg.shape_feature_prefix)))
+    validate_safe_feature_columns(cfg.extra_node_feature_columns, context="extra_node_feature_columns")
     columns.extend(column for column in cfg.extra_node_feature_columns if column in spots.columns and column not in columns)
     columns.extend(column for column in temporal_feature_columns(spots, cfg) if column in spots.columns and column not in columns)
     return tuple(columns)
@@ -137,7 +155,21 @@ def temporal_feature_columns(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig |
 def temporal_base_feature_columns(spots: pd.DataFrame, cfg: FrameGraphDatasetConfig | None = None) -> tuple[str, ...]:
     cfg = cfg or FrameGraphDatasetConfig()
     candidates = cfg.temporal_feature_columns or DEFAULT_TEMPORAL_FEATURES
+    validate_safe_feature_columns(candidates, context="temporal_feature_columns")
     return tuple(column for column in candidates if column in spots.columns)
+
+
+def validate_safe_feature_columns(columns: Sequence[str], *, context: str) -> None:
+    unsafe = [
+        column
+        for column in columns
+        if column in UNSAFE_NODE_FEATURE_COLUMNS
+        or any(column.startswith(prefix) for prefix in UNSAFE_NODE_FEATURE_PREFIXES)
+    ]
+    if unsafe:
+        raise ValueError(
+            f"{context} contains target/linkage columns that would leak labels or future links into node features: {unsafe}"
+        )
 
 
 def default_shape_target_columns(
@@ -172,6 +204,18 @@ def add_one_step_targets(
     out[cfg.node_id_col] = pd.to_numeric(out[cfg.node_id_col], errors="raise").astype(np.int64)
     out[cfg.frame_col] = pd.to_numeric(out[cfg.frame_col], errors="raise").astype(np.int64)
     out["n_next"] = pd.to_numeric(out["n_next"], errors="coerce").fillna(0).astype(np.int64)
+    duplicate_key_mask = out.duplicated([cfg.sequence_col, cfg.node_id_col], keep=False)
+    if duplicate_key_mask.any():
+        examples = (
+            out.loc[duplicate_key_mask, [cfg.sequence_col, cfg.node_id_col]]
+            .drop_duplicates()
+            .head(5)
+            .to_dict("records")
+        )
+        raise ValueError(
+            f"{cfg.node_id_col} must be unique within {cfg.sequence_col} to build one-step targets; "
+            f"duplicate keys include: {examples}"
+        )
 
     max_frame_by_sequence = out.groupby(cfg.sequence_col, dropna=False)[cfg.frame_col].transform("max")
     out["valid_event_mask"] = out[cfg.frame_col] < max_frame_by_sequence
@@ -421,6 +465,10 @@ def cell_graph_to_pyg_training_data(graph: CellGraph, cfg: FrameGraphDatasetConf
 
     data.sequence_uid = str(nodes[cfg.sequence_col].iloc[0]) if cfg.sequence_col in nodes else None
     data.frame = int(nodes[cfg.frame_col].iloc[0]) if cfg.frame_col in nodes else None
+    data.pos_xy = torch.as_tensor(
+        _numeric_matrix(nodes, cfg.position_cols, cfg.nan_fill_value),
+        dtype=torch.float32,
+    )
 
     for column, dtype in (
         ("valid_event_mask", torch.bool),

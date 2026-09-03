@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from Real_game_of_life.GNN.dataset_cache import SplitConfig, build_graph_cache, save_graph_cache
 from Real_game_of_life.GNN.graph_dataset import FrameGraphDatasetConfig
 from Real_game_of_life.GNN.run_full_one_step import run_full_training
@@ -46,3 +48,42 @@ def test_run_full_training_writes_server_artifacts(tmp_path: Path) -> None:
     assert (out_dir / "effective_config.json").exists()
     assert (out_dir / "full_run_summary.json").exists()
     assert (out_dir / "final_report.md").exists()
+
+
+def test_run_full_training_refuses_implicit_temporal_cache_without_temporal_config(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="temporal-looking cache"):
+        run_full_training(
+            preset="smoke",
+            cache_path=tmp_path / "frame_graphs_temporal.pt",
+            out_dir=tmp_path / "blocked",
+            build_cache_if_missing=True,
+            train_overrides={"device": "cpu"},
+        )
+
+
+def test_run_full_training_can_auto_build_temporal_cache_when_configured(tmp_path: Path) -> None:
+    source = tmp_path / "spots.parquet"
+    _sample_spots().to_parquet(source)
+    cache_path = tmp_path / "frame_graphs_temporal.pt"
+
+    summary = run_full_training(
+        preset="smoke",
+        cache_path=cache_path,
+        source_path=source,
+        out_dir=tmp_path / "temporal_full_run",
+        temporal_lags=(1,),
+        temporal_feature_columns=("x", "AREA"),
+        max_graphs=2,
+        train_overrides={
+            "epochs": 1,
+            "batch_size": 2,
+            "hidden_dim": 16,
+            "layers": 1,
+            "dropout": 0.0,
+            "device": "cpu",
+        },
+    )
+
+    assert cache_path.exists()
+    assert summary["cache_summary"]["temporal_lags"] == [1]
+    assert "temporal_lag1_x" in summary["cache_summary"]["node_features"]
