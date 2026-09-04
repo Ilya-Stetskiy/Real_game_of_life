@@ -11,7 +11,14 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from .gnn_model import CellGNNOutput
+from .graph_dataset import POLARIZATION_ANGLE_COLUMN, POLARIZATION_ANGLE_PERIOD
 from .hybrid_field_gnn_model import FieldConditionedGNNOutput
+
+
+def _wrap_nematic_delta(x: Tensor, period: float = POLARIZATION_ANGLE_PERIOD) -> Tensor:
+    """Torch equivalent of graph_dataset.wrap_nematic_delta; keeps gradients flowing."""
+    half = period / 2.0
+    return torch.remainder(x + half, period) - half
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,8 @@ def prediction_to_next_graph(
     for offset, column in enumerate(shape_columns):
         index = _feature_index(feature_columns, column)
         physical_x[:, index] = physical_x[:, index] + delta_shape[:, offset]
+
+    _apply_polarization_delta(graph, output, physical_x, feature_columns)
 
     _shift_temporal_features(previous_x, physical_x, feature_columns, cfg.nan_fill_value)
 
@@ -173,6 +182,8 @@ def differentiable_prediction_to_next_graph(
         index = _feature_index(feature_columns, column)
         physical_x[:, index] = physical_x[:, index] + delta_shape[:, offset]
 
+    _apply_polarization_delta(graph, output, physical_x, feature_columns, detach=False)
+
     _shift_temporal_features(previous_x, physical_x, feature_columns, cfg.nan_fill_value)
     normalized_x = _normalize_x_on_device(physical_x, node_feature_normalization).to(dtype=graph.x.dtype)
 
@@ -253,6 +264,43 @@ def _shape_feature_columns(graph: Data, feature_columns: Sequence[str], output_s
     if len(columns) != output_shape_dim:
         raise ValueError(f"Could not map delta_shape dim={output_shape_dim} to shape feature columns={columns}.")
     return columns
+
+
+def _polarization_feature_columns(graph: Data, feature_columns: Sequence[str]) -> tuple[str, ...]:
+    if not hasattr(graph, "polarization_columns"):
+        return ()
+    columns = tuple(str(column) for column in graph.polarization_columns)
+    return tuple(column for column in columns if column in feature_columns)
+
+
+def _apply_polarization_delta(
+    graph: Data,
+    output: CellGNNOutput,
+    physical_x: Tensor,
+    feature_columns: Sequence[str],
+    *,
+    detach: bool = True,
+) -> None:
+    delta_polarization = getattr(output, "delta_polarization", None)
+    if delta_polarization is None:
+        return
+    polarization_columns = _polarization_feature_columns(graph, feature_columns)
+    if not polarization_columns:
+        return
+    delta_polarization = delta_polarization.float()
+    if detach:
+        delta_polarization = delta_polarization.detach().cpu()
+    if delta_polarization.shape != (physical_x.size(0), len(polarization_columns)):
+        raise ValueError(
+            f"delta_polarization must have shape {(physical_x.size(0), len(polarization_columns))}, "
+            f"got {tuple(delta_polarization.shape)}"
+        )
+    for offset, column in enumerate(polarization_columns):
+        index = _feature_index(feature_columns, column)
+        physical_x[:, index] = physical_x[:, index] + delta_polarization[:, offset]
+    if POLARIZATION_ANGLE_COLUMN in polarization_columns:
+        angle_index = _feature_index(feature_columns, POLARIZATION_ANGLE_COLUMN)
+        physical_x[:, angle_index] = _wrap_nematic_delta(physical_x[:, angle_index])
 
 
 def _stats_tensors(stats: dict[str, Any] | None, size: int) -> tuple[Tensor, Tensor] | None:
@@ -494,6 +542,13 @@ def _attach_placeholder_targets(next_graph: Data, source_graph: Data) -> None:
         next_graph.valid_shape_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
     if hasattr(source_graph, "shape_target_columns"):
         next_graph.shape_target_columns = list(source_graph.shape_target_columns)
+    if hasattr(source_graph, "target_delta_polarization"):
+        polarization_dim = int(source_graph.target_delta_polarization.size(-1))
+        next_graph.target_delta_polarization = torch.zeros((num_nodes, polarization_dim), dtype=torch.float32, device=device)
+    if hasattr(source_graph, "valid_polarization_mask"):
+        next_graph.valid_polarization_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
+    if hasattr(source_graph, "polarization_columns"):
+        next_graph.polarization_columns = list(source_graph.polarization_columns)
     for attr in ("target_division", "target_death", "valid_event_mask"):
         if hasattr(source_graph, attr):
             dtype = torch.bool if attr.startswith("valid_") else torch.float32

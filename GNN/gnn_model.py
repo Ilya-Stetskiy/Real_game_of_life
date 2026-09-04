@@ -19,6 +19,7 @@ class CellGNNOutput:
     node_embeddings: Tensor
     trajectory_hypotheses: Optional[Tensor] = None
     division_horizon_logits: Optional[Tensor] = None
+    delta_polarization: Optional[Tensor] = None
 
 
 class CellInteractionGNN(nn.Module):
@@ -67,6 +68,7 @@ class CellInteractionGNN(nn.Module):
 
         self.delta_pos_head = nn.Linear(hidden_dim, 2)
         self.delta_shape_head = nn.Linear(hidden_dim, shape_dim)
+        self.delta_polarization_head = nn.Linear(hidden_dim, 2)
         self.division_head = nn.Linear(hidden_dim, 1)
         self.death_head = nn.Linear(hidden_dim, 1)
         self.division_horizon_head = (
@@ -100,6 +102,7 @@ class CellInteractionGNN(nn.Module):
         return CellGNNOutput(
             delta_pos=self.delta_pos_head(z),
             delta_shape=self.delta_shape_head(z),
+            delta_polarization=self.delta_polarization_head(z),
             division_logits=self.division_head(z).squeeze(-1),
             death_logits=self.death_head(z).squeeze(-1),
             node_embeddings=h,
@@ -195,8 +198,10 @@ def cell_dynamics_loss(
     target_delta_shape: Tensor,
     target_division: Tensor,
     target_death: Tensor,
+    target_delta_polarization: Optional[Tensor] = None,
     valid_regression_mask: Optional[Tensor] = None,
     valid_shape_mask: Optional[Tensor] = None,
+    valid_polarization_mask: Optional[Tensor] = None,
     valid_event_mask: Optional[Tensor] = None,
     target_division_horizon: Optional[Tensor] = None,
     valid_division_horizon_mask: Optional[Tensor] = None,
@@ -205,6 +210,7 @@ def cell_dynamics_loss(
     pos_weight_division_horizon: Optional[Tensor] = None,
     lambda_pos: float = 1.0,
     lambda_shape: float = 1.0,
+    lambda_polarization: float = 1.0,
     lambda_division: float = 1.0,
     lambda_death: float = 1.0,
     lambda_division_horizon: float = 0.0,
@@ -219,6 +225,12 @@ def cell_dynamics_loss(
         pos_loss = masked_regression_loss(output.delta_pos, target_delta_pos, valid_regression_mask)
 
     shape_loss = masked_regression_loss(output.delta_shape, target_delta_shape, valid_shape_mask)
+    if output.delta_polarization is not None and target_delta_polarization is not None:
+        polarization_loss = masked_regression_loss(
+            output.delta_polarization, target_delta_polarization, valid_polarization_mask
+        )
+    else:
+        polarization_loss = output.delta_shape.new_tensor(0.0)
     division_loss = masked_bce_with_logits(
         output.division_logits,
         target_division.float(),
@@ -244,6 +256,7 @@ def cell_dynamics_loss(
     total = (
         lambda_pos * pos_loss
         + lambda_shape * shape_loss
+        + lambda_polarization * polarization_loss
         + lambda_division * division_loss
         + lambda_death * death_loss
         + lambda_division_horizon * division_horizon_loss
@@ -252,6 +265,7 @@ def cell_dynamics_loss(
         "loss_total": total.detach(),
         "loss_pos": pos_loss.detach(),
         "loss_shape": shape_loss.detach(),
+        "loss_polarization": polarization_loss.detach(),
         "loss_division": division_loss.detach(),
         "loss_death": death_loss.detach(),
         "loss_division_horizon": division_horizon_loss.detach(),

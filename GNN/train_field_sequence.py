@@ -370,6 +370,10 @@ def run_sequence_epoch(
         "pos_count": 0,
         "shape_sq_error": 0.0,
         "shape_count": 0,
+        "polarization_theta_sq_error": 0.0,
+        "polarization_theta_count": 0,
+        "polarization_aspect_sq_error": 0.0,
+        "polarization_aspect_count": 0,
     }
     event_scores: dict[str, list[torch.Tensor]] = {
         "division": [],

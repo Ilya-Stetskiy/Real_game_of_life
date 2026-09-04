@@ -8,7 +8,7 @@ import torch
 from Real_game_of_life.GNN.dataset_cache import SplitConfig, build_graph_cache, save_graph_cache
 from Real_game_of_life.GNN.graph_dataset import FrameGraphDatasetConfig
 from Real_game_of_life.GNN.spatial_field import FieldGeometry
-from Real_game_of_life.GNN.tests.test_graph_dataset import _sample_spots
+from Real_game_of_life.GNN.tests.test_graph_dataset import _sample_spots, _sample_spots_with_polarization
 from Real_game_of_life.GNN.train_one_step import (
     TrainConfig,
     binary_average_precision,
@@ -65,6 +65,7 @@ def test_batch_loss_counts_use_valid_target_masks() -> None:
     class Batch:
         valid_regression_mask = torch.tensor([True, False, False])
         valid_shape_mask = torch.tensor([True, True, False])
+        valid_polarization_mask = torch.tensor([True, False, False])
         valid_event_mask = torch.tensor([True, True, True])
 
     horizon_mask = torch.tensor([[True, False], [False, False], [True, True]])
@@ -72,6 +73,7 @@ def test_batch_loss_counts_use_valid_target_masks() -> None:
 
     assert counts["loss_pos"] == 1
     assert counts["loss_shape"] == 2
+    assert counts["loss_polarization"] == 1
     assert counts["loss_division"] == 3
     assert counts["loss_death"] == 3
     assert counts["loss_division_horizon"] == 3
@@ -135,6 +137,50 @@ def test_train_from_cache_runs_smoke_epoch(tmp_path: Path) -> None:
     assert "loss_division_horizon" in result["history"][0]
     assert "division_h3_ap" in result["history"][0]
     assert "division_h5_recall" in result["history"][0]
+
+
+def test_train_from_cache_reports_polarization_rmse(tmp_path: Path) -> None:
+    dataset_config = FrameGraphDatasetConfig(
+        node_feature_columns=(
+            "x",
+            "y",
+            "AREA",
+            "SOLIDITY",
+            "shape_r_norm_000",
+            "shape_r_norm_001",
+            "ELLIPSE_THETA",
+            "ELLIPSE_ASPECTRATIO",
+        ),
+        edge_radius=3.0,
+        horizons=(3, 5, 10),
+    )
+    cache = build_graph_cache(
+        spots=_sample_spots_with_polarization(),
+        dataset_config=dataset_config,
+        split_config=SplitConfig(mode="none"),
+    )
+    cache_path = tmp_path / "cache.pt"
+    save_graph_cache(cache, cache_path)
+
+    result = train_from_cache(
+        TrainConfig(
+            cache_path=cache_path,
+            out_dir=tmp_path / "run",
+            epochs=2,
+            batch_size=2,
+            hidden_dim=16,
+            layers=1,
+            dropout=0.0,
+            learning_rate=1e-3,
+            device="cpu",
+        )
+    )
+
+    train_row = result["history"][0]
+    assert "polarization_theta_rmse" in train_row
+    assert "polarization_aspect_rmse" in train_row
+    assert torch.isfinite(torch.tensor(train_row["polarization_theta_rmse"]))
+    assert torch.isfinite(torch.tensor(train_row["polarization_aspect_rmse"]))
 
 
 def test_train_from_cache_runs_field_gnn_smoke_epoch(tmp_path: Path) -> None:

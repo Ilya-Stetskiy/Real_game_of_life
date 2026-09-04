@@ -12,6 +12,7 @@ from torch import nn
 
 from .dataset_cache import DEFAULT_CACHE_PATH, load_graph_cache
 from .gnn_model import CellInteractionGNN
+from .graph_dataset import POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN, wrap_nematic_delta
 from .rollout import differentiable_prediction_to_next_graph
 from .train_one_step import apply_node_feature_normalization, infer_division_horizons, infer_shape_dim, jsonable, resolve_device
 from .train_rollout_bptt import group_graphs_by_sequence, match_next_graph_indices, rollout_config_from_cache
@@ -39,6 +40,8 @@ def evaluate_model_rollout(
             "position_sq_errors": [],
             "shape_sq_errors": [],
             "valid_shapes": 0,
+            "polarization_theta_sq_errors": [],
+            "polarization_aspect_sq_errors": [],
             "matched_nodes": 0,
         }
         for horizon in horizons
@@ -110,7 +113,14 @@ def compare_checkpoints(
             apply_node_feature_normalization(model_graphs, normalization)
         model_sequences = group_graphs_by_sequence(model_graphs)
         model = _build_model_for_checkpoint(checkpoint, model_graphs).to(device)
-        model.load_state_dict(checkpoint["model_state"])
+        load_result = model.load_state_dict(checkpoint["model_state"], strict=False)
+        if load_result.missing_keys or load_result.unexpected_keys:
+            print(
+                f"{label}: checkpoint architecture mismatch (loaded non-strict) -- "
+                f"missing={load_result.missing_keys} unexpected={load_result.unexpected_keys}. "
+                "Heads absent from the checkpoint keep randomly-initialized weights; "
+                "metrics for those heads (e.g. polarization_*_rmse on pre-polarization checkpoints) are meaningless."
+            )
         metrics = evaluate_model_rollout(
             model,
             model_sequences,
@@ -146,15 +156,32 @@ def _accumulate_horizon_metrics(
     accumulator["matched_nodes"] += count
 
     feature_columns = tuple(str(column) for column in predicted_graph.node_feature_columns)
-    shape_columns = tuple(str(column) for column in getattr(predicted_graph, "shape_target_columns", []))
-    shape_indices = [feature_columns.index(column) for column in shape_columns if column in feature_columns]
-    if not shape_indices:
-        return
     pred_physical = _denormalize_x(predicted_graph.x, node_feature_normalization)
     gt_physical = _denormalize_x(gt_graph.x, node_feature_normalization).to(
         device=pred_physical.device,
         dtype=pred_physical.dtype,
     )
+
+    polarization_columns = tuple(str(column) for column in getattr(predicted_graph, "polarization_columns", []))
+    if polarization_columns:
+        if POLARIZATION_ANGLE_COLUMN in polarization_columns and POLARIZATION_ANGLE_COLUMN in feature_columns:
+            angle_index = feature_columns.index(POLARIZATION_ANGLE_COLUMN)
+            pred_angle = pred_physical[valid][:, angle_index]
+            gt_angle = gt_physical[gt_indices][:, angle_index]
+            angle_error = wrap_nematic_delta((pred_angle - gt_angle).detach().cpu().numpy())
+            accumulator["polarization_theta_sq_errors"].extend((angle_error ** 2).tolist())
+        if POLARIZATION_MAGNITUDE_COLUMN in polarization_columns and POLARIZATION_MAGNITUDE_COLUMN in feature_columns:
+            aspect_index = feature_columns.index(POLARIZATION_MAGNITUDE_COLUMN)
+            pred_aspect = pred_physical[valid][:, aspect_index]
+            gt_aspect = gt_physical[gt_indices][:, aspect_index]
+            accumulator["polarization_aspect_sq_errors"].extend(
+                ((pred_aspect - gt_aspect) ** 2).detach().cpu().tolist()
+            )
+
+    shape_columns = tuple(str(column) for column in getattr(predicted_graph, "shape_target_columns", []))
+    shape_indices = [feature_columns.index(column) for column in shape_columns if column in feature_columns]
+    if not shape_indices:
+        return
     pred_shape = pred_physical[valid][:, shape_indices]
     gt_shape = gt_physical[gt_indices][:, shape_indices]
     accumulator["shape_sq_errors"].extend(((pred_shape - gt_shape) ** 2).detach().cpu().flatten().tolist())
@@ -171,6 +198,8 @@ def _finalize_horizon_metrics(horizon: int, accumulator: dict[str, Any]) -> dict
     position_errors = np.asarray(accumulator["position_errors"], dtype=float)
     position_sq_errors = np.asarray(accumulator["position_sq_errors"], dtype=float)
     shape_sq_errors = np.asarray(accumulator["shape_sq_errors"], dtype=float)
+    polarization_theta_sq_errors = np.asarray(accumulator["polarization_theta_sq_errors"], dtype=float)
+    polarization_aspect_sq_errors = np.asarray(accumulator["polarization_aspect_sq_errors"], dtype=float)
     return {
         "horizon": int(horizon),
         "matched_nodes": matched,
@@ -179,6 +208,12 @@ def _finalize_horizon_metrics(horizon: int, accumulator: dict[str, Any]) -> dict
         "position_rmse": float(np.sqrt(position_sq_errors.mean())) if position_sq_errors.size else float("nan"),
         "shape_rmse": float(np.sqrt(shape_sq_errors.mean())) if shape_sq_errors.size else float("nan"),
         "valid_shape_fraction": float(accumulator["valid_shapes"] / matched) if matched else float("nan"),
+        "polarization_theta_rmse": (
+            float(np.sqrt(polarization_theta_sq_errors.mean())) if polarization_theta_sq_errors.size else float("nan")
+        ),
+        "polarization_aspect_rmse": (
+            float(np.sqrt(polarization_aspect_sq_errors.mean())) if polarization_aspect_sq_errors.size else float("nan")
+        ),
     }
 
 
@@ -264,7 +299,9 @@ def main() -> None:
         print(
             f"{row['model']} h={row['horizon']} matched={row['matched_nodes']} "
             f"pos_mean={row['position_mean']:.4f} pos_median={row['position_median']:.4f} "
-            f"shape_rmse={row['shape_rmse']:.4f} valid_shape={row['valid_shape_fraction']:.4f}"
+            f"shape_rmse={row['shape_rmse']:.4f} valid_shape={row['valid_shape_fraction']:.4f} "
+            f"polarization_theta_rmse={row['polarization_theta_rmse']:.4f} "
+            f"polarization_aspect_rmse={row['polarization_aspect_rmse']:.4f}"
         )
 
 

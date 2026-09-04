@@ -9,12 +9,15 @@ import torch
 
 from Real_game_of_life.GNN.graph_dataset import (
     FrameGraphDatasetConfig,
+    POLARIZATION_ANGLE_COLUMN,
+    POLARIZATION_MAGNITUDE_COLUMN,
     add_one_step_targets,
     add_temporal_features,
     build_frame_graphs,
     cell_graph_to_pyg_training_data,
     default_node_feature_columns,
     load_processed_spots,
+    wrap_nematic_delta,
 )
 
 
@@ -233,3 +236,64 @@ def test_real_processed_spots_smoke_builds_pyg_graph() -> None:
     assert data.edge_attr.shape[0] == data.edge_index.shape[1]
     assert hasattr(data, "target_delta_pos")
     assert hasattr(data, "target_division_within_3")
+
+
+def test_wrap_nematic_delta_picks_shortest_rotation_across_the_pi_boundary() -> None:
+    assert wrap_nematic_delta(0.3) == pytest.approx(0.3)
+    assert wrap_nematic_delta(-0.3) == pytest.approx(-0.3)
+    # theta going from 3.10 to -1.55 is a small rotation once the pi-periodicity
+    # (axis, not vector) is accounted for, not the raw ~-4.65 jump.
+    raw_diff = -1.55 - 3.10
+    wrapped = wrap_nematic_delta(raw_diff)
+    assert -np.pi / 2 <= wrapped < np.pi / 2
+    assert wrapped == pytest.approx(-1.5084073464102072)
+    # the interval is half-open [-half, half): +half wraps down to -half.
+    assert wrap_nematic_delta(np.pi / 2) == pytest.approx(-np.pi / 2)
+    assert wrap_nematic_delta(-np.pi / 2) == pytest.approx(-np.pi / 2)
+    np.testing.assert_allclose(wrap_nematic_delta(np.array([0.1, -0.1 - np.pi])), [0.1, -0.1])
+
+
+def _sample_spots_with_polarization() -> pd.DataFrame:
+    spots = _sample_spots()
+    spots[POLARIZATION_ANGLE_COLUMN] = [3.10, 0.2, -1.55, 0.5, 1.0, -0.4]
+    spots[POLARIZATION_MAGNITUDE_COLUMN] = [1.5, 2.0, 1.8, 2.2, 1.1, 3.0]
+    return spots
+
+
+def test_add_one_step_targets_computes_wrapped_polarization_deltas() -> None:
+    prepared = add_one_step_targets(_sample_spots_with_polarization(), _cfg())
+    by_id = prepared.set_index("spot_id")
+
+    # spot 1 (frame 0) -> spot 3 (frame 1): theta 3.10 -> -1.55, aspect 1.5 -> 1.8
+    assert bool(by_id.at[1, "valid_polarization_mask"]) is True
+    assert by_id.at[1, "target_delta_ELLIPSE_THETA"] == pytest.approx(-1.5084073464102072)
+    assert by_id.at[1, "target_delta_ELLIPSE_ASPECTRATIO"] == pytest.approx(0.3)
+
+    # spot 3 (frame 1) has no next spot -> no polarization regression target.
+    assert bool(by_id.at[3, "valid_polarization_mask"]) is False
+
+    # spot 2 splits into two daughters -> not a valid single-next regression target.
+    assert bool(by_id.at[2, "valid_polarization_mask"]) is False
+
+
+def test_add_one_step_targets_skips_polarization_when_columns_absent() -> None:
+    prepared = add_one_step_targets(_sample_spots(), _cfg())
+    assert "target_delta_ELLIPSE_THETA" not in prepared.columns
+    assert "target_delta_ELLIPSE_ASPECTRATIO" not in prepared.columns
+    assert "valid_polarization_mask" not in prepared.columns
+
+
+def test_cell_graph_to_pyg_training_data_attaches_polarization_targets() -> None:
+    cfg = FrameGraphDatasetConfig(
+        node_feature_columns=("x", "y", "AREA", "SOLIDITY", POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN),
+        edge_radius=3.0,
+        horizons=(3, 5, 10),
+    )
+    graphs = build_frame_graphs(_sample_spots_with_polarization(), cfg)
+    data = cell_graph_to_pyg_training_data(graphs[0], cfg)
+
+    assert data.polarization_columns == [POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN]
+    assert data.target_delta_polarization.shape == (2, 2)
+    assert bool(data.valid_polarization_mask[0]) is True
+    assert float(data.target_delta_polarization[0, 0]) == pytest.approx(-1.5084073464102072, abs=1e-5)
+    assert float(data.target_delta_polarization[0, 1]) == pytest.approx(0.3, abs=1e-5)

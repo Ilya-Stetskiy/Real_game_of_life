@@ -4,7 +4,14 @@ import pytest
 import torch
 
 from Real_game_of_life.GNN.gnn_model import CellGNNOutput, CellInteractionGNN
-from Real_game_of_life.GNN.graph_dataset import FrameGraphDatasetConfig, build_frame_graphs, cell_graph_to_pyg_training_data
+from Real_game_of_life.GNN.graph_dataset import (
+    POLARIZATION_ANGLE_COLUMN,
+    POLARIZATION_MAGNITUDE_COLUMN,
+    FrameGraphDatasetConfig,
+    build_frame_graphs,
+    cell_graph_to_pyg_training_data,
+    wrap_nematic_delta,
+)
 from Real_game_of_life.GNN.hybrid_field_gnn_model import FieldConditionedCellGNN
 from Real_game_of_life.GNN.rollout import (
     RolloutGraphConfig,
@@ -12,7 +19,7 @@ from Real_game_of_life.GNN.rollout import (
     field_prediction_to_next_graph,
     prediction_to_next_graph,
 )
-from Real_game_of_life.GNN.tests.test_graph_dataset import _sample_spots
+from Real_game_of_life.GNN.tests.test_graph_dataset import _sample_spots, _sample_spots_with_polarization
 from Real_game_of_life.GNN.train_one_step import fit_node_feature_normalization
 
 
@@ -49,6 +56,24 @@ def _frame_graph(edge_radius: float = 12.0):
         horizons=(3, 5, 10),
     )
     return cell_graph_to_pyg_training_data(build_frame_graphs(_sample_spots(), cfg)[0], cfg)
+
+
+def _frame_graph_with_polarization(edge_radius: float = 12.0):
+    cfg = FrameGraphDatasetConfig(
+        node_feature_columns=(
+            "x",
+            "y",
+            "AREA",
+            "SOLIDITY",
+            "shape_r_norm_000",
+            "shape_r_norm_001",
+            POLARIZATION_ANGLE_COLUMN,
+            POLARIZATION_MAGNITUDE_COLUMN,
+        ),
+        edge_radius=edge_radius,
+        horizons=(3, 5, 10),
+    )
+    return cell_graph_to_pyg_training_data(build_frame_graphs(_sample_spots_with_polarization(), cfg)[0], cfg)
 
 
 def test_prediction_to_next_graph_updates_features_and_rebuilds_edges() -> None:
@@ -257,6 +282,48 @@ def test_model_prediction_can_be_reused_as_next_model_input() -> None:
     assert next_graph.x.shape[1] == graph.x.shape[1]
     assert next_graph.edge_attr.shape[1] == graph.edge_attr.shape[1]
     assert next_output.delta_pos.shape == output.delta_pos.shape
+
+
+def test_prediction_to_next_graph_applies_polarization_delta_with_wrap() -> None:
+    graph = _frame_graph_with_polarization(edge_radius=12.0)
+    theta_index = graph.node_feature_columns.index(POLARIZATION_ANGLE_COLUMN)
+    aspect_index = graph.node_feature_columns.index(POLARIZATION_MAGNITUDE_COLUMN)
+    assert graph.polarization_columns == [POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN]
+
+    output = _output(graph.num_nodes, graph.target_delta_shape.size(1))
+    # node 0 starts near the theta wrap boundary; a -1.5 rad step should wrap around.
+    output.delta_polarization = torch.tensor([[-1.5, 0.2], [0.1, -0.1]], dtype=torch.float32)
+
+    next_graph = prediction_to_next_graph(
+        graph,
+        output,
+        config=RolloutGraphConfig(edge_radius=20.0),
+    )
+
+    expected_theta = wrap_nematic_delta((graph.x[:, theta_index] + output.delta_polarization[:, 0]).numpy())
+    assert torch.allclose(next_graph.x[:, theta_index], torch.as_tensor(expected_theta, dtype=torch.float32), atol=1e-5)
+    assert torch.allclose(next_graph.x[:, aspect_index], graph.x[:, aspect_index] + output.delta_polarization[:, 1])
+    assert torch.all(next_graph.x[:, theta_index] >= -torch.pi / 2)
+    assert torch.all(next_graph.x[:, theta_index] < torch.pi / 2)
+    assert next_graph.polarization_columns == [POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN]
+
+
+def test_differentiable_prediction_to_next_graph_preserves_gradients_through_polarization() -> None:
+    graph = _frame_graph_with_polarization(edge_radius=12.0)
+    delta_polarization = torch.zeros((graph.num_nodes, 2), dtype=torch.float32, requires_grad=True)
+    output = _output(graph.num_nodes, graph.target_delta_shape.size(1))
+    output.delta_polarization = delta_polarization
+
+    next_graph = differentiable_prediction_to_next_graph(
+        graph,
+        output,
+        config=RolloutGraphConfig(edge_radius=20.0),
+    )
+    loss = next_graph.x.sum()
+    loss.backward()
+
+    assert delta_polarization.grad is not None
+    assert torch.isfinite(delta_polarization.grad).all()
 
 
 def test_field_prediction_to_next_graph_carries_next_field_and_pos_xy() -> None:

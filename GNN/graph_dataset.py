@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -180,6 +180,24 @@ def default_shape_target_columns(
     return tuple(sorted(column for column in spots.columns if column.startswith(cfg.shape_feature_prefix)))
 
 
+POLARIZATION_ANGLE_COLUMN = "ELLIPSE_THETA"
+POLARIZATION_MAGNITUDE_COLUMN = "ELLIPSE_ASPECTRATIO"
+POLARIZATION_COLUMNS = (POLARIZATION_ANGLE_COLUMN, POLARIZATION_MAGNITUDE_COLUMN)
+POLARIZATION_ANGLE_PERIOD = np.pi
+POLARIZATION_TARGET_COLUMNS = tuple(f"target_delta_{column}" for column in POLARIZATION_COLUMNS)
+
+
+def wrap_nematic_delta(diff: Any, period: float = POLARIZATION_ANGLE_PERIOD) -> np.ndarray:
+    """Wrap an angular difference onto [-period/2, period/2).
+
+    Ellipse major-axis orientation is nematic (theta and theta + pi describe the
+    same axis), so a naive next-minus-current delta breaks at the wrap boundary
+    (e.g. theta going from 3.10 to -1.55 is a small rotation, not a ~4.65 jump).
+    """
+    half = period / 2.0
+    return ((np.asarray(diff, dtype=float) + half) % period) - half
+
+
 def add_one_step_targets(
     spots: pd.DataFrame,
     cfg: FrameGraphDatasetConfig | None = None,
@@ -200,6 +218,7 @@ def add_one_step_targets(
         raise ValueError(f"Cannot build one-step targets, missing columns: {missing}")
 
     shape_columns = tuple(shape_target_columns) if shape_target_columns is not None else default_shape_target_columns(spots, cfg)
+    polarization_columns = POLARIZATION_COLUMNS if all(column in spots.columns for column in POLARIZATION_COLUMNS) else ()
     out = spots.copy().reset_index(drop=True)
     out[cfg.node_id_col] = pd.to_numeric(out[cfg.node_id_col], errors="raise").astype(np.int64)
     out[cfg.frame_col] = pd.to_numeric(out[cfg.frame_col], errors="raise").astype(np.int64)
@@ -236,6 +255,11 @@ def add_one_step_targets(
     for column in shape_columns:
         out[f"target_delta_{column}"] = np.nan
 
+    if polarization_columns:
+        for column in POLARIZATION_TARGET_COLUMNS:
+            out[column] = np.nan
+        out["valid_polarization_mask"] = False
+
     row_index_col = "_gnn_row_index"
     next_id_col = "_gnn_next_id"
     out[row_index_col] = np.arange(len(out), dtype=np.int64)
@@ -249,6 +273,7 @@ def add_one_step_targets(
             next_id_col,
             *cfg.position_cols,
             *shape_columns,
+            *polarization_columns,
         ]
         left = out.loc[single_mask, left_columns].copy()
         left[next_id_col] = left[next_id_col].astype(np.int64)
@@ -259,7 +284,10 @@ def add_one_step_targets(
             cfg.position_cols[1]: "_next_y",
         }
         right_renames.update({column: f"_next_{column}" for column in shape_columns})
-        right = out[[cfg.sequence_col, cfg.node_id_col, *cfg.position_cols, *shape_columns]].rename(columns=right_renames)
+        right_renames.update({column: f"_next_{column}" for column in polarization_columns})
+        right = out[[cfg.sequence_col, cfg.node_id_col, *cfg.position_cols, *shape_columns, *polarization_columns]].rename(
+            columns=right_renames
+        )
 
         joined = left.merge(right, on=[cfg.sequence_col, next_id_col], how="left", sort=False)
         valid_next = joined["_next_x"].notna() & joined["_next_y"].notna()
@@ -293,6 +321,30 @@ def add_one_step_targets(
             if shape_valid.any():
                 rows = joined.loc[shape_valid, row_index_col].astype(np.int64).to_numpy()
                 out.loc[rows, "valid_shape_mask"] = True
+
+        if polarization_columns:
+            current_theta = pd.to_numeric(joined[POLARIZATION_ANGLE_COLUMN], errors="coerce")
+            next_theta = pd.to_numeric(joined[f"_next_{POLARIZATION_ANGLE_COLUMN}"], errors="coerce")
+            current_aspect = pd.to_numeric(joined[POLARIZATION_MAGNITUDE_COLUMN], errors="coerce")
+            next_aspect = pd.to_numeric(joined[f"_next_{POLARIZATION_MAGNITUDE_COLUMN}"], errors="coerce")
+            polarization_valid = (
+                valid_next
+                & current_theta.notna()
+                & next_theta.notna()
+                & current_aspect.notna()
+                & next_aspect.notna()
+            )
+            rows = joined.loc[polarization_valid, row_index_col].astype(np.int64).to_numpy()
+            if len(rows):
+                out.loc[rows, "target_delta_ELLIPSE_THETA"] = wrap_nematic_delta(
+                    next_theta.loc[polarization_valid].to_numpy(dtype=float)
+                    - current_theta.loc[polarization_valid].to_numpy(dtype=float)
+                )
+                out.loc[rows, "target_delta_ELLIPSE_ASPECTRATIO"] = (
+                    next_aspect.loc[polarization_valid].to_numpy(dtype=float)
+                    - current_aspect.loc[polarization_valid].to_numpy(dtype=float)
+                )
+                out.loc[rows, "valid_polarization_mask"] = True
 
     index_by_spot = {
         (row[cfg.sequence_col], int(row[cfg.node_id_col])): index
@@ -474,6 +526,7 @@ def cell_graph_to_pyg_training_data(graph: CellGraph, cfg: FrameGraphDatasetConf
         ("valid_event_mask", torch.bool),
         ("valid_regression_mask", torch.bool),
         ("valid_shape_mask", torch.bool),
+        ("valid_polarization_mask", torch.bool),
         ("target_has_next", torch.float32),
         ("target_single_next", torch.float32),
         ("target_division", torch.float32),
@@ -491,6 +544,13 @@ def cell_graph_to_pyg_training_data(graph: CellGraph, cfg: FrameGraphDatasetConf
             dtype=torch.float32,
         )
         data.shape_target_columns = [column.replace("target_delta_", "", 1) for column in shape_target_columns]
+
+    if all(column in nodes.columns for column in POLARIZATION_TARGET_COLUMNS):
+        data.target_delta_polarization = torch.as_tensor(
+            _numeric_matrix(nodes, list(POLARIZATION_TARGET_COLUMNS), cfg.nan_fill_value),
+            dtype=torch.float32,
+        )
+        data.polarization_columns = list(POLARIZATION_COLUMNS)
 
     for horizon in cfg.horizons:
         target_column = f"division_within_{horizon}_frames"

@@ -32,7 +32,7 @@
 | Файл | Описание |
 |------|----------|
 | `graph_conversion.py` | Конвертация таблиц → PyG-графы (radius, kNN, adaptive edges) |
-| `graph_dataset.py` | `GraphDataset` — загрузка, сплиты, нормализация |
+| `graph_dataset.py` | `GraphDataset` — загрузка, сплиты, нормализация; таргеты позиции, формы и поляризации (`ELLIPSE_THETA`/`ELLIPSE_ASPECTRATIO`, угол — нематический, период π, см. `wrap_nematic_delta`) |
 | `dataset_cache.py` | `GraphCache` — кэширование графов в `.pt`, CLI |
 
 ### Обучение
@@ -44,6 +44,8 @@
 | `rollout.py` | Конвертация предсказаний в граф для multi-step роллаута |
 | `run_full_one_step.py` | Оркестратор полного пайплайна |
 | `tabular_baseline.py` | Бейзлайн: XGBoost / LightGBM / RandomForest |
+| `robustness_sweep.py` | Прогон train_one_step по нескольким сидам/split-mode, агрегация метрик (mean/std/median/IQR) |
+| `kinetic_baseline.py` | Физический baseline без обучения (persistent random walk / OU по скорости), метрики по горизонтам роллаута в формате `evaluate_rollout.py` |
 
 ### Прочее
 

@@ -44,6 +44,7 @@ class TrainConfig:
     device: str = "auto"
     lambda_pos: float = 1.0
     lambda_shape: float = 0.25
+    lambda_polarization: float = 0.25
     lambda_division: float = 1.0
     lambda_death: float = 0.25
     lambda_division_horizon: float = 1.0
@@ -329,6 +330,10 @@ def run_epoch(
         "pos_count": 0,
         "shape_sq_error": 0.0,
         "shape_count": 0,
+        "polarization_theta_sq_error": 0.0,
+        "polarization_theta_count": 0,
+        "polarization_aspect_sq_error": 0.0,
+        "polarization_aspect_count": 0,
     }
     event_scores: dict[str, list[torch.Tensor]] = {
         "division": [],
@@ -356,8 +361,10 @@ def run_epoch(
                     target_delta_shape=batch.target_delta_shape,
                     target_division=batch.target_division,
                     target_death=batch.target_death,
+                    target_delta_polarization=getattr(batch, "target_delta_polarization", None),
                     valid_regression_mask=batch.valid_regression_mask,
                     valid_shape_mask=batch.valid_shape_mask,
+                    valid_polarization_mask=getattr(batch, "valid_polarization_mask", None),
                     valid_event_mask=batch.valid_event_mask,
                     target_division_horizon=target_division_horizon,
                     valid_division_horizon_mask=valid_division_horizon_mask,
@@ -366,6 +373,7 @@ def run_epoch(
                     pos_weight_division_horizon=pos_weight_division_horizon,
                     lambda_pos=config.lambda_pos,
                     lambda_shape=config.lambda_shape,
+                    lambda_polarization=config.lambda_polarization,
                     lambda_division=config.lambda_division,
                     lambda_death=config.lambda_death,
                     lambda_division_horizon=config.lambda_division_horizon,
@@ -413,6 +421,7 @@ def run_epoch(
     metrics["loss_total"] = (
         config.lambda_pos * metrics.get("loss_pos", 0.0)
         + config.lambda_shape * metrics.get("loss_shape", 0.0)
+        + config.lambda_polarization * metrics.get("loss_polarization", 0.0)
         + config.lambda_division * metrics.get("loss_division", 0.0)
         + config.lambda_death * metrics.get("loss_death", 0.0)
         + config.lambda_division_horizon * metrics.get("loss_division_horizon", 0.0)
@@ -421,6 +430,14 @@ def run_epoch(
         metrics["pos_rmse"] = float((regression_sums["pos_sq_error"] / regression_sums["pos_count"]) ** 0.5)
     if regression_sums["shape_count"] > 0:
         metrics["shape_rmse"] = float((regression_sums["shape_sq_error"] / regression_sums["shape_count"]) ** 0.5)
+    if regression_sums["polarization_theta_count"] > 0:
+        metrics["polarization_theta_rmse"] = float(
+            (regression_sums["polarization_theta_sq_error"] / regression_sums["polarization_theta_count"]) ** 0.5
+        )
+    if regression_sums["polarization_aspect_count"] > 0:
+        metrics["polarization_aspect_rmse"] = float(
+            (regression_sums["polarization_aspect_sq_error"] / regression_sums["polarization_aspect_count"]) ** 0.5
+        )
     metrics.update(epoch_event_metrics(event_scores, event_targets))
     add_metric_prefix_alias(metrics, source_prefix="death", alias_prefix="disappearance")
     seconds = max(time.perf_counter() - start_time, 1e-9)
@@ -597,6 +614,9 @@ def batch_loss_counts(batch: Any, valid_division_horizon_mask: torch.Tensor | No
     return {
         "loss_pos": int(batch.valid_regression_mask.bool().sum().item()) if hasattr(batch, "valid_regression_mask") else 0,
         "loss_shape": int(batch.valid_shape_mask.bool().sum().item()) if hasattr(batch, "valid_shape_mask") else 0,
+        "loss_polarization": int(batch.valid_polarization_mask.bool().sum().item())
+        if hasattr(batch, "valid_polarization_mask")
+        else 0,
         "loss_division": int(valid_event.sum().item()) if valid_event is not None else 0,
         "loss_death": int(valid_event.sum().item()) if valid_event is not None else 0,
         "loss_division_horizon": int(valid_division_horizon_mask.bool().sum().item()) if valid_division_horizon_mask is not None else 0,
@@ -621,6 +641,19 @@ def accumulate_regression_sums(output, batch, sums: dict[str, float | int]) -> N
         error = output.delta_shape[valid_shape] - batch.target_delta_shape[valid_shape]
         sums["shape_sq_error"] = float(sums["shape_sq_error"]) + float((error ** 2).sum().item())
         sums["shape_count"] = int(sums["shape_count"]) + int(error.numel())
+    valid_polarization = getattr(batch, "valid_polarization_mask", None)
+    if valid_polarization is not None and getattr(output, "delta_polarization", None) is not None:
+        valid_polarization = valid_polarization.bool()
+        if int(valid_polarization.sum()) > 0:
+            error = output.delta_polarization[valid_polarization] - batch.target_delta_polarization[valid_polarization]
+            sums["polarization_theta_sq_error"] = float(sums["polarization_theta_sq_error"]) + float(
+                (error[:, 0] ** 2).sum().item()
+            )
+            sums["polarization_theta_count"] = int(sums["polarization_theta_count"]) + int(error.size(0))
+            sums["polarization_aspect_sq_error"] = float(sums["polarization_aspect_sq_error"]) + float(
+                (error[:, 1] ** 2).sum().item()
+            )
+            sums["polarization_aspect_count"] = int(sums["polarization_aspect_count"]) + int(error.size(0))
 
 
 def regression_batch_metrics(output, batch) -> dict[str, float]:
@@ -969,6 +1002,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=TrainConfig().seed)
     parser.add_argument("--lambda-pos", type=float, default=TrainConfig().lambda_pos)
     parser.add_argument("--lambda-shape", type=float, default=TrainConfig().lambda_shape)
+    parser.add_argument("--lambda-polarization", type=float, default=TrainConfig().lambda_polarization)
     parser.add_argument("--lambda-division", type=float, default=TrainConfig().lambda_division)
     parser.add_argument("--lambda-death", type=float, default=TrainConfig().lambda_death)
     parser.add_argument("--lambda-division-horizon", type=float, default=TrainConfig().lambda_division_horizon)
@@ -1023,6 +1057,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         device=args.device,
         lambda_pos=args.lambda_pos,
         lambda_shape=args.lambda_shape,
+        lambda_polarization=args.lambda_polarization,
         lambda_division=args.lambda_division,
         lambda_death=args.lambda_death,
         lambda_division_horizon=args.lambda_division_horizon,
